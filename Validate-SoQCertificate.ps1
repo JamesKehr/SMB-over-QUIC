@@ -65,7 +65,7 @@ BeforeAll {
     # https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gpnap/a48b02b2-2a10-4eb0-bed4-1807a6d2f5ad
     # Retrieved 18 Jan 2023
     # array of supported signature hash algorithms
-    $script:ValidSigAlgorithms = "sha256ECDSA", "sha384ECDSA", "sha512ECDSA"
+    $script:ValidSigAlgorithms = "sha256ECDSA", "sha384ECDSA", "sha512ECDSA", "sha256RSA". "sha384RSA", "sha512RSA"
 
     # array of supported sig hashes
     $script:ValidSigHash = "sha256", "sha384", "sha512"

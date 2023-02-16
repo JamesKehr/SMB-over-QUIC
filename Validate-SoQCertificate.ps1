@@ -945,7 +945,7 @@ class SoQCipherSuite {
     $isVerTls13
 
     SoQCipherSuite(){
-        $this.TlsString       = $null
+        $this.TlsString    = $null
         $this.StrongCrypto = $false
         $this.isVerTls13   = $false
     }
@@ -957,8 +957,8 @@ class SoQCipherSuite {
         $this.isVerTls13   = $obj.isVerTls13
     }
 
-    SetString([string]$TlsString) {
-        Write-Host -ForegroundColor DarkBlue "Cipher string: $TlsString"
+    SetTlsString([string]$TlsString) {
+        Write-Debug "SoQCipherSuite. - Cipher string: $TlsString"
         $this.TlsString = $TlsString
     }
 
@@ -969,26 +969,24 @@ class SoQCipherSuite {
             $this.StrongCrypto = $false
         }
 
-        Write-Host -ForegroundColor DarkBlue "Strong crypto: $($this.StrongCrypto)"
+        Write-Debug "SoQCipherSuite.SetStrongCrypto - Strong crypto: $($this.StrongCrypto)"
     }
 
     SetIsVerTls13([string]$str) {
         if ($str -match 'TLS 1.3') {
-            Write-Host -ForegroundColor Green "Is TLS 1.3"
+            Write-Debug "SoQCipherSuite.SetIsVerTls13 - Is TLS 1.3"
             $this.isVerTls13 = $true
         } else {
             $this.isVerTls13 = $false
-            Write-Host -ForegroundColor Red "Is NOT TLS 1.3"
+            Write-Debug "SoQCipherSuite.SetIsVerTls13 - Is NOT TLS 1.3"
         }
-        Write-Host -ForegroundColor DarkBlue "TLS 1.3: $($this.isVerTls13)"
+        Write-Debug "SoQCipherSuite.SetIsVerTls13 - TLS 1.3: $($this.isVerTls13)"
     }
 
     [string]
     ToString() {
         return @"
-Cipher suite string              : $($this.TlsString)
-Allowed by SCH_USE_STRONG_CRYPTO : $($this.StrongCrypto)
-Is a TLS 1.3 cipher suite        : $($this.isVerTls13)
+TlsString: $($this.TlsString); STRONG_CRYPTO: $($this.StrongCrypto); TLS1.3Suite: $($this.isVerTls13)
 "@
     }
 }
@@ -1128,7 +1126,7 @@ class SoQTls13Support {
                                 switch ($tdNum) {
                                     1 { 
                                         Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Adding cipher string"
-                                        $tmpRow.SetString($text)
+                                        $tmpRow.SetTlsString($text)
                                         $tdNum++
                                     }
                                     

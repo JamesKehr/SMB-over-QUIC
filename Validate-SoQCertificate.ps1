@@ -25,7 +25,10 @@ DONE - Public key algorithm           : ECDSA_P256 (or greater. Can also use RSA
 Adding as part of validation
 
 DONE - Valid lifetime (not expired)  : (Current date after NotBefore and before NotAfter certificate dates)
-Trusted certificate chain            : (Root and Intermediate CAs are trusted)
+DONE - Trusted certificate chain            : (Root and Intermediate CAs are trusted)
+
+Check cipher suites to ensure that TLS 1.3 suites are enabled. TLS 1.3 states that you cannot use downlevel cipher suites, so disabling TLS 1.3 suites breaks SMB over QUIC and possibly KDC Proxy.
+Validate that the OS is 2022 Azure Edition
 
 #>
 
@@ -50,7 +53,7 @@ param (
     [switch]
     $Detailed,
 
-    # Returns the results to the console.
+    # Returns the SMB over QUIC certificate test object(s) to the console.
     [Parameter()]
     [switch]
     $PassThru
@@ -105,6 +108,79 @@ class SoQCert {
 }
 
 #>
+
+
+# Make sure this is a SMB over QUIC supported server OS.
+class SoQSupportedOS {
+    [bool]
+    $IsValid
+
+    [string]
+    $FailureReason = $null
+
+    SoQSupportedOS() {
+        Write-Verbose "SoQSupportedOS - Begin"
+        $this.IsValid = $true
+        $this.ValidateServerOS()
+        Write-Verbose "SoQSupportedOS - End"
+    }
+
+    ValidateServerOS() {
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - Begin"
+
+        # get OS version
+        $osVer = [System.Environment]::OSVersion | ForEach-Object { $_.Version }
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - osVer: $($osVer.ToString())"
+
+        # use WMI to get OS details, since this is designed to run on Windows
+        $wmiOS = Get-WmiObject Win32_OperatingSystem -Property Caption,ProductType
+        $osName =  $wmiOS.Caption
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - Caption: $osName"
+
+        # ProductType: 1 = workstation, 2 = DC, 3 = Server
+        $osType = $wmiOS.ProductType
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - osType: $osType"
+
+        $this.FailureReason = ""
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - Start - IsValid: $($this.IsValid); FailureReason: $($this.FailureReason)"
+
+        # must be server or DC product type
+        if ( $osType -ne 2 -and $osType -ne 3 ) {
+            $this.IsValid = $false
+            $this.FailureReason += "Not Windows Server."
+        }
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - ProductType - IsValid: $($this.IsValid); FailureReason: $($this.FailureReason)"
+
+        # must be Server 2022 or higher
+        if ($osVer.Major -lt 10 -and $osVer.Build -lt 20348) {
+            $this.IsValid = $false
+            $this.FailureReason += " Not Windows Server 2022 or greater."
+        } 
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - Version - IsValid: $($this.IsValid); FailureReason: $($this.FailureReason)"
+        
+        # the edition must be Azure Edition
+        if ($osName -notmatch "Azure Edition") {
+            $this.IsValid = $false
+            $this.FailureReason += " Not Azure Edition."
+        }
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - Azure Edition - IsValid: $($this.IsValid); FailureReason: $($this.FailureReason)"
+
+        # clear failure reason if IsValid passed
+        if ( $this.IsValid ) {
+            $this.FailureReason = $null
+        }
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - End - IsValid: $($this.IsValid); FailureReason: $($this.FailureReason)"
+    }
+
+    [string]
+    ToString() {
+        return @"
+SupportedOS
+   Valid       : $($this.IsValid)
+   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+"@
+    }
+}
 
 # tracks and stores certificate dates and whether the certificate date is out of bounds
 class SoQCertExpired {
@@ -165,6 +241,7 @@ Valid Dates
    Not Before : $($this.NotBefore.ToShortDateString()) $($this.NotBefore.ToShortTimeString())
    Not After  : $($this.NotAfter.ToShortDateString()) $($this.NotAfter.ToShortTimeString())
    Valid      : $($this.IsValid)
+   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
 "@
     }
 }
@@ -223,6 +300,7 @@ class SoQCertPurpose {
 Purpose
    Purpose : $($this.Purpose -join ', ')
    Valid   : $($this.IsValid)
+   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
 "@
     }
 }
@@ -291,11 +369,12 @@ class SoQCertKeyUsage {
 Key Usage
    Key Usage : $($this.KeyUsage.TrimEnd("`n`r"))
    Valid     : $($this.IsValid)
+   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
 "@
     }
 }
 
-
+# Subject must contain something
 class SoQCertSubject {
     [string]
     $Subject
@@ -352,11 +431,12 @@ class SoQCertSubject {
 Subject
    Subject : $($this.Subject)
    Valid   : $($this.IsValid)
+   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
 "@
     }
 }
 
-
+# There must be at least one Subject Alternative Name
 class SoQCertSAN {
     [string[]]
     $SubjectAltName
@@ -409,11 +489,12 @@ class SoQCertSAN {
 Subject Alternative Name (DNS)
    DNS List : $($this.SubjectAltName -join ', ')
    Valid    : $($this.IsValid)
+   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
 "@
     }
 }
 
-
+# The private key must be installed
 class SoQCertPrivateKey {
     [bool]
     $IsValid
@@ -448,12 +529,13 @@ class SoQCertPrivateKey {
     {
         return @"
 Private Key
-   HasPrivateKey : $($this.IsValid)        
+   HasPrivateKey : $($this.IsValid)
+   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" }) 
 "@
     }
 }
 
-
+# TLS 1.3 algorithms must be supported
 class SoQCertSignatureAlgorithm {
     [string]
     $SignatureAlgorithm
@@ -516,10 +598,12 @@ class SoQCertSignatureAlgorithm {
 Signature Algorithm
    SignatureAlgorithm : $($this.SignatureAlgorithm)
    Valid              : $($this.IsValid)
+   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
 "@
     }
 }
 
+# Cannot use a weak signature hash
 class SoQCertSignatureHash {
     [string]
     $SignatureHash
@@ -599,10 +683,12 @@ class SoQCertSignatureHash {
 Signature Hash
    Hash  : $($this.SignatureHash)
    Valid : $($this.IsValid)
+   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
 "@
     }
 }
 
+# A strong key algorithm must be used
 class SoQCertPublicKeyAlgorithm {
     [string]
     $PublicKeyAlgorithm
@@ -634,99 +720,93 @@ class SoQCertPublicKeyAlgorithm {
         if ($script:psVerMaj -ge 7)
         {
             Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - pwsh7 - Using [System.Security.Cryptography.X509Certificates.PublicKey] methods."
-            switch -Regex ($Certificate.SignatureAlgorithm.FriendlyName)
-            {
-                "ECDSA" {
-                    Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (7) Switch: ECDSA"
-                    $objPKA = $Certificate.PublicKey.GetECDsaPublicKey()
-                    $pka = "$($objPKA.SignatureAlgorithm.ToUpper())_P$($objPKA.KeySize.ToString())"
-                    break
-                }
-    
-                "RSA" {
-                    Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (7) Switch: RSA"
-                    $objPKA = $Certificate.PublicKey.GetRSAPublicKey()
+
+            <#
+            
+                It is possible that the Signature Algorithm and the Public Key Algorithm are different methods.
+                For example, the SA can be RSA and the PKA can be ECDSA.
+
+                Sometimes the PubilcKey namespace doesn't show any details about the algorithm in the main properties
+                and guessing based on the SA doesn't work, so you have to go through down the lists of methods
+                until you find one that works.
+
+                The order:
+
+                ECDSA
+                RSA
+                DSA
+                ECDiffieHellman
+            
+            #>
+
+            # controls whether the PKA has been found
+            $fndPKA = $false
+
+            # trying ECDSA, which should be used most
+            Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (7) Testing: ECDSA"
+            $objPKA = $Certificate.PublicKey.GetECDsaPublicKey()
+
+            if ( -NOT [string]::IsNullOrEmpty($objPKA.SignatureAlgorithm) ) {
+                Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (7) Found ECDSA"
+                $fndPKA = $true
+                $pka = "$($objPKA.SignatureAlgorithm.ToUpper())_P$($objPKA.KeySize.ToString())"
+            }
+
+            if ( -NOT $fndPKA ) {
+                Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (7) Testing: RSA"
+                # try RSA
+                $objPKA = $Certificate.PublicKey.GetRSAPublicKey()
+
+                if (-NOT [string]::IsNullOrEmpty($objPKA.SignatureAlgorithm) ) {
+                    $fndPKA = $true
                     $pka = "$($objPKA.SignatureAlgorithm.ToUpper())$($objPKA.KeySize.ToString())"
-                    break
                 }
-    
-                # untested... don't have a matching cert to test
-                "DSA" {
-                    Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (7) Switch: DSA"
-                    $objPKA = $Certificate.PublicKey.GetDSAPublicKey()
+            }
+
+
+            if ( -NOT $fndPKA ) {
+                Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (7) Testing: DSA"
+                # try DSA
+                $objPKA = $Certificate.PublicKey.GetDSAPublicKey()
+
+                if (-NOT [string]::IsNullOrEmpty($objPKA.SignatureAlgorithm) ) {
+                    Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (7) Found RSA"
+                    $fndPKA = $true
                     $pka = "$($objPKA.SignatureAlgorithm.ToUpper())$($objPKA.KeySize.ToString())"
-                    break
                 }
-    
-                default {
-                    Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - Switch: (7) default"
-                    $pka = "Unknown"
+            }
+
+
+            if ( -NOT $fndPKA ) {
+                Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (7) Testing: ECDH"
+                # try ECDiffieHellman
+                $objPKA = $Certificate.PublicKey.GetECDiffieHellmanPublicKey()
+
+                if (-NOT [string]::IsNullOrEmpty($objPKA.SignatureAlgorithm) ) {
+                    Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (7) Found ECDH"
+                    $fndPKA = $true
+                    $pka = "$($objPKA.SignatureAlgorithm.ToUpper())$($objPKA.KeySize.ToString())"
                 }
+            }
+
+            if ( -NOT $fndPKA ) {
+                Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (7) Could not detect the Public Key Algorithm."
+                $pka = "Unknown"
             }
         }
         else {
             Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - PowerShell 5.1 - Trying to abstract the answer."
             
-            [regex]$rgxHash = "(?<hash>md\d{1})|(?<hash>sha\d{1,3})"
-            [regex]$rgxBit = "(?<bit>\d{1,3})"
+            # .NET 4.x can only detect RSA and DSA. ECDSA and ECDH do not work
+            $provider = $Certificate.PublicKey.Oid.FriendlyName
+            $size = $Certificate.PublicKey.Key.KeySize
 
-            $saName = $Certificate.SignatureAlgorithm.FriendlyName
-
-            switch -Regex ($saName)
-            {
-                "ECDSA" {
-                    Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (5) Switch: ECDSA"
-                    if ( $saName -match $rgxHash)
-                    {
-                        $hash = $Matches.hash
-                    }
-                    else 
-                    {
-                        $hash = $null
-                    }
-
-                    if ( [string]::IsNullOrEmpty($hash) )
-                    {
-                        $pka = $null
-                    }
-                    else
-                    {
-                        [int]$bits = 1
-                        if ($hash -match $rgxBit)
-                        {
-                            $bits = $Matches.bit
-                        }
-                        $pka = "ECDSA_P$bits"
-                    }
-                    break
-                }
-
-                "RSA" {
-                    Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - (5) Switch: RSA"
-
-                    # RSA public keys should have some legacy values that can be used
-                    $provider = $Certificate.PublicKey.Oid.FriendlyName
-                    $size = $Certificate.PublicKey.Key.KeySize
-
-                    if ( -NOT [string]::IsNullOrEmpty($provider) -and -NOT [string]::IsNullOrEmpty($size) )
-                    {
-                        $pka = "$($provider.ToUpper())$size"
-                    } elseif ( -NOT [string]::IsNullOrEmpty($size) )
-                    {
-                        $pka = "RSA$size"
-                    }
-                    else 
-                    {
-                        $pka = $null
-                    }
-                }
-
-                default { 
-                    Write-Debug "[SoQCertPublicKeyAlgorithm].GetPKAString() - Switch: (5) default"
-                    $pka = "Unknown"
-                }
+            if ( $pka -eq "RSA" -or $pka -eq "DSA" ) {
+                $pka = "$provider$size"
+            } else {
+                $pka = "Unknown"
+                $this.FailureReason = "Legacy Windows PowerShell 5.1 cannot decode ECDSA and ECDH public keys. Please try again with PowerShell 7."
             }
-
 
             
         }
@@ -749,7 +829,13 @@ class SoQCertPublicKeyAlgorithm {
         Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - Start"
         [bool]$isValidtmp = $false
 
-        if ( $this.PublicKeyAlgorithm -in $this.GetValidPKA() )
+        if ($this.FailureReason) {
+            # Detection will fail when PowerShell 5.1 is used and the PKA is EC-based. 
+            # Use that FailureReason and return $false
+            Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - IsValid: False"
+            $isValidtmp = $false
+            Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - Failure Reason: $($this.FailureReason)"
+        } elseif ( $this.PublicKeyAlgorithm -in $this.GetValidPKA() )
         {
             Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - IsValid: True"
             $isValidtmp = $true
@@ -757,7 +843,7 @@ class SoQCertPublicKeyAlgorithm {
         else 
         {
             Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - IsValid: False"
-            $this.FailureReason = "Not a known good Public Key Algorithm. ($($this.PublicKeyAlgorithm))"
+            $this.FailureReason = "Not a known supported Public Key Algorithm. ($($this.PublicKeyAlgorithm))"
             Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - Failure Reason: $($this.FailureReason)"
             Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - PublicKeyAlgorithm: $($this.PublicKeyAlgorithm), Valid Range: $($this.GetValidPKA() -join ', ')"
         }
@@ -773,10 +859,12 @@ class SoQCertPublicKeyAlgorithm {
 Public Key Algorithm     
    PKA   : $($this.PublicKeyAlgorithm)
    Valid : $($this.IsValid)
+   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
 "@
     }
 }
 
+# The certificate chain must be trusted
 class SoQCertCertChain {
     [bool]
     $IsValid
@@ -840,13 +928,303 @@ class SoQCertCertChain {
         return @"
 Certificate Chain
    ValidCertChain : $($this.IsValid)
+   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
 "@
     }
 }
 
+
+class SoQCipherSuite {
+    [string]
+    $TlsString
+
+    [bool]
+    $StrongCrypto
+
+    [bool]
+    $isVerTls13
+
+    SoQCipherSuite(){
+        $this.TlsString       = $null
+        $this.StrongCrypto = $false
+        $this.isVerTls13   = $false
+    }
+
+    # used to create a class object from ConvertFrom-Json
+    SoQCipherSuite([PSCustomObject]$obj){
+        $this.TlsString    = $obj.TlsString
+        $this.StrongCrypto = $obj.StrongCrypto
+        $this.isVerTls13   = $obj.isVerTls13
+    }
+
+    SetString([string]$TlsString) {
+        Write-Host -ForegroundColor DarkBlue "Cipher string: $TlsString"
+        $this.TlsString = $TlsString
+    }
+
+    SetStrongCrypto([string]$str) {
+        if ($str -match 'Yes') {
+            $this.StrongCrypto = $true
+        } else {
+            $this.StrongCrypto = $false
+        }
+
+        Write-Host -ForegroundColor DarkBlue "Strong crypto: $($this.StrongCrypto)"
+    }
+
+    SetIsVerTls13([string]$str) {
+        if ($str -match 'TLS 1.3') {
+            Write-Host -ForegroundColor Green "Is TLS 1.3"
+            $this.isVerTls13 = $true
+        } else {
+            $this.isVerTls13 = $false
+            Write-Host -ForegroundColor Red "Is NOT TLS 1.3"
+        }
+        Write-Host -ForegroundColor DarkBlue "TLS 1.3: $($this.isVerTls13)"
+    }
+
+    [string]
+    ToString() {
+        return @"
+Cipher suite string              : $($this.TlsString)
+Allowed by SCH_USE_STRONG_CRYPTO : $($this.StrongCrypto)
+Is a TLS 1.3 cipher suite        : $($this.isVerTls13)
+"@
+    }
+}
+
+
+class SoQTls13Support {
+    [array]
+    $Tls13CipherSuites
+
+    [bool]
+    $isValid
+
+    [string]
+    $FailureReason = $null
+
+    SoQTls13Support() {
+        Write-Verbose "SoQTls13Support - Begin"
+        # if there is an internet connection we get the list of supported TLS 1.3 cipher suites
+        if ((Get-NetConnectionProfile).IPv4Connectivity -contains "Internet" -or (Get-NetConnectionProfile).IPv6Connectivity -contains "Internet") {
+            Write-Verbose "SoQTls13Support - Trying to get the live TLS 1.3 list."
+            $this.GetTls13CipherSuitesFromInternet()
+        } else {
+            Write-Verbose "SoQTls13Support - Using last known good TLS 1.3 list."
+           $this.UseLastKnownGoodTls13CipherSuites()
+        }
+
+        # test whether there is at least one valid TLS 1.3 cipher suite enabled on the system
+        Write-Verbose "SoQTls13Support - Validating TLS 1.3 support."
+        $this.ValidateLocalCipherSuite()
+
+        Write-Verbose "SoQTls13Support - Result:`n$($this.ToString())"
+        Write-Verbose "SoQTls13Support - End"
+    }
+
+    # populates Tls13CipherSuites with a list of known supported TLS 1.3 ciphers in Windows
+    # https://learn.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-server-2022
+    # Retrieved: 15 Feb 2023
+    UseLastKnownGoodTls13CipherSuites() {
+        Write-Verbose "SoQTls13Support.UseLastKnownGoodTls13CipherSuites() - Begin"
+        # use the last known good list of TLS 1.3 cipher suites
+        $tmpList = @'
+[
+   {
+       "TlsString": "TLS_AES_256_GCM_SHA384",
+       "StrongCrypto": true,
+       "isVerTls13": true
+   },
+   {
+       "TlsString": "TLS_AES_128_GCM_SHA256",
+       "StrongCrypto": true,
+       "isVerTls13": true
+   },
+   {
+       "TlsString": "TLS_CHACHA20_POLY1305_SHA256",
+       "StrongCrypto": true,
+       "isVerTls13": true
+   }
+]
+'@ | ConvertFrom-Json
+        
+        # do this separately or things get mixed up
+        [array]$tmpObj = $tmpList | ForEach-Object { [SoQCipherSuite]::new($_) }
+
+        # add results to the class
+        $this.Tls13CipherSuites = $tmpObj   
+        
+        Write-Verbose "SoQTls13Support.UseLastKnownGoodTls13CipherSuites() - End"
+   }
+
+   # Retrieves the current list of supported TLS 1.3 cipher suites.
+   # https://learn.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-server-2022
+    GetTls13CipherSuitesFromInternet() {
+        Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Begin"
+        # The TLS 1.3 cipher suites must be enabled in Windows.
+        # right now SoQ only supports Windows Server 2022 so keep this simple for now
+        $url = 'https://learn.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-server-2022'
+
+        # download the page
+        Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Set TLS for Invoke-WebRequest."
+        [System.Net.ServicePointManager]::SecurityProtocol = "Tls12", "Tls13"
+
+        $rawSite = $null
+        try {
+            Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Downloading the cipher suite site."
+            $rawSite = Invoke-WebRequest $url -UseBasicParsing -EA Stop
+        }
+        catch {
+            Write-Verbose "Failed to download the current TLS 1.3 list: $_"
+            $this.UseLastKnownGoodTls13CipherSuites()
+        }
+        
+        if ($rawSite) {
+            # PowerShell 7 has no native HTML parser, so do this old school.
+            # Only interested in saving details about TLS 1.3 cipher strings
+            # first, initialize a bunch of variables.
+            $tls13CipherTable = @()
+            $tableStarted = $false
+            $rowStarted = $false
+            $tdNum = 0
+            $tmpRow = [SoQCipherSuite]::new()
+            $rawSite.RawContent -split "`n" | Foreach-Object { 
+                # look for the table start
+                if ($_ -match "<table>") {
+                    Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Start table"
+                    # controls whether to look for tr elements
+                    $tableStarted = $true
+
+                    # start table row
+                    $rowStarted = $false
+
+                    # How many td elements have been found. Each table element has three:
+                    # 1 = Cipher suite string
+                    # 2 = Allowed by SCH_USE_STRONG_CRYPTO
+                    # 3 = TLS/SSL Protocol versions
+                    $tdNum = 1
+
+                } elseif ($_ -match '</table>') {
+                    Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - End table"
+                    $tableStarted = $false
+                } elseif ( $tableStarted ) {
+                    # look for a table header we want.
+                    if ($_ -match '<tr>') {
+                        Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Start row"
+                        $rowStarted = $true
+                    } elseif ($_ -match '</tr>') {
+                        Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - End row"
+                        $rowStarted = $false
+
+                        $tmpRow = [SoQCipherSuite]::new()
+                    } elseif ($rowStarted) {
+                        # parse the text between <td> and <br/></td> and add it to the class
+                        if ($_ -match "<td>(?<str>\w{2}.*)<br/></td>") {
+                            $text = $Matches.str
+                            Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Found match: $text"
+                            
+                            if ( -NOT [string]::IsNullOrEmpty($text) ) {
+                                switch ($tdNum) {
+                                    1 { 
+                                        Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Adding cipher string"
+                                        $tmpRow.SetString($text)
+                                        $tdNum++
+                                    }
+                                    
+                                    2 { 
+                                        Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Adding strong crypto"
+                                        $tmpRow.SetStrongCrypto($text) 
+                                        $tdNum++
+                                    }
+
+                                    3 { 
+                                        Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Testing if TLS 1.3."
+                                        $tmpRow.SetIsVerTls13($text) 
+
+                                        # add to the results only if it's a TLS 1.3 compatible suite
+                                        if ($tmpRow.isVerTls13) {
+                                            Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Adding to list.`n`n$($tmpRow.ToString())`n`n"
+                                            $tls13CipherTable += $tmpRow
+                                        }
+
+                                        $tdNum = 1
+                                    }
+
+                                    default { Write-Error "You shouldn't be here."}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            # set the suites if we got results
+            if ($tls13CipherTable.Count -ge 1) {
+                Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Successfully got a working list."
+                $this.Tls13CipherSuites = $tls13CipherTable
+            # Otherwise, use the last known good set. Just in case something doesn't work.
+            } else {
+                Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - Something went wrong, falling back to Last Known Good list."
+                $this.UseLastKnownGoodTls13CipherSuites()
+            }
+        }
+
+        Write-Verbose "SoQTls13Support.GetTls13CipherSuitesFromInternet() - End"
+    }
+
+    # checks whether the local list of suites has a TLS 1.3 cipher.
+    # if the default is used we assume there is a supported cipher, because Windows Server 2022 supports TLS 1.3 by default
+    ValidateLocalCipherSuite() {
+        Write-Verbose "SoQTls13Support.ValidateLocalCipherSuite() - Begin"
+        # look for the registry value that controls cipher suites
+        [array]$cipherPol = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Cryptography\Configuration\SSL\00010002' | ForEach-Object { $_.Functions.Split(',') }
+
+        Write-Verbose "SoQTls13Support.ValidateLocalCipherSuite() - Cipher suites: $($cipherPol -join ', ')"
+
+        if ($cipherPol.Count -ge 1) {
+            Write-Verbose "SoQTls13Support.ValidateLocalCipherSuite() - Starting validation."
+            # test whether there is an approved TLS 1.3 cipher
+            $fndValidTls13Suite = $false
+
+            $this.Tls13CipherSuites | ForEach-Object { 
+                if ($_.String -in $cipherPol) {
+                    Write-Verbose "SoQTls13Support.ValidateLocalCipherSuite() - Found a match: $($_.String)"
+                    $fndValidTls13Suite = $true
+                }
+            }
+
+            if ($fndValidTls13Suite) {
+                Write-Verbose "SoQTls13Support.ValidateLocalCipherSuite() - Validation passed."
+                $this.isValid = $true
+            } else {
+                Write-Verbose "SoQTls13Support.ValidateLocalCipherSuite() - Validation failed."
+                $this.isValid = $false
+                $this.FailureReason = "The 'SSL Cipher Suite Order' policy has been modified and does not include a TLS 1.3 compatible cipher suite. See: https://learn.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-server-2022"
+            }
+
+        } else {
+            Write-Verbose "SoQTls13Support.ValidateLocalCipherSuite() - Policy is default. Accepting this as a pass."
+            # no special cipher policy is installed, the default will be compatible.
+            $this.isValid = $true
+        }
+        Write-Verbose "SoQTls13Support.ValidateLocalCipherSuite() - End"
+    }
+
+    [string]
+    ToString() {
+        return @"
+SoQTls13Support
+   Tls13CipherSuites : $($this.Tls13CipherSuites.TlsString -join ',') 
+   Valid           : $($this.isValid)
+   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+"@
+    }
+}
+
+
 # this class monitors the certs 
-class SoQCertValidation
-{
+class SoQCertValidation {
     # the certificate object
     [System.Security.Cryptography.X509Certificates.X509Certificate]
     $Certificate
@@ -856,6 +1234,9 @@ class SoQCertValidation
 
     [string[]]
     $FailedTests
+
+    [SoQSupportedOS]
+    $SupportedOS
 
     [SoQCertExpired]
     $Expiration
@@ -887,12 +1268,17 @@ class SoQCertValidation
     [SoQCertCertChain]
     $CertChain
 
+    [SoQTls13Support]
+    $Tls13Support
+
 
     SoQCertValidation([System.Security.Cryptography.X509Certificates.X509Certificate]$Certificate)
     {
         Write-Debug "[SoQCertValidation] - Start"
         $this.Certificate        = $Certificate
         Write-Debug "[SoQCertValidation] - Thumbprint: $($this.Certificate.Thumbprint), Subject: $($this.Certificate.Subject)"
+        Write-Debug "[SoQCertValidation] - SupportedOS"
+        $this.SupportedOS        = [SoQSupportedOS]::new()
         Write-Debug "[SoQCertValidation] - Expiration"
         $this.Expiration         = [SoQCertExpired]::new($Certificate)
         Write-Debug "[SoQCertValidation] - Purpose"
@@ -913,6 +1299,8 @@ class SoQCertValidation
         $this.PublicKeyAlgorithm = [SoQCertPublicKeyAlgorithm]::new($Certificate)
         Write-Debug "[SoQCertValidation] - CertChain"
         $this.CertChain          = [SoQCertCertChain]::new($Certificate)
+        Write-Debug "[SoQCertValidation] - Tls13Support"
+        $this.Tls13Support       = [SoQTls13Support]::new()
         Write-Debug "[SoQCertValidation] - Validate"
         $this.IsValid            = $this.ValidateSoQCert()
         Write-Debug "[SoQCertValidation] - End"
@@ -922,7 +1310,7 @@ class SoQCertValidation
     [string[]]
     GetSubclassVariables()
     {
-        return [string[]]("Expiration","Purpose","KeyUsage","Subject","SubjectAltName","PrivateKey","SignatureAlgorithm","SignatureHash","PublicKeyAlgorithm","CertChain")
+        return [string[]]("SupportedOS","Expiration","Purpose","KeyUsage","Subject","SubjectAltName","PrivateKey","SignatureAlgorithm","SignatureHash","PublicKeyAlgorithm","CertChain","Tls13Support")
     }
 
     [bool]
@@ -955,6 +1343,7 @@ class SoQCertValidation
     {
         return @"
 Thumbprint: $($this.Certificate.Thumbprint)
+$($this.SupportedOS.ToString())
 $($this.Expiration.ToString())
 $($this.Purpose.ToString())
 $($this.KeyUsage.ToString())
@@ -1076,7 +1465,8 @@ else
 {
     $certs | Format-Table -Property @{Name="Thumbprint"; Expression={($_.Certificate.Thumbprint)}}, `
                                     @{Name="Subject"; Expression={($_.Subject.Subject)}}, `
-                                    @{Name="IsValid"; Expression={($_.IsValid)}}, @{Name="FailedTests"; Expression={($_.FailedTests)}}
+                                    @{Name="IsValid"; Expression={($_.IsValid)}}, `
+                                    @{Name="FailedTests"; Expression={($_.FailedTests)}}
 }
 
 

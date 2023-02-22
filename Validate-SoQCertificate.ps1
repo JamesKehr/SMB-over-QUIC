@@ -1534,7 +1534,7 @@ if ( $Detailed.IsPresent )
             } elseif ($_.Result -eq "Fail") {
                 $color = '31'
             } else {
-                $color = '32'
+                $color = '93'
             }
             $e = [char]27
            "$e[${color}m$($_.Result)${e}[0m"
@@ -1542,7 +1542,7 @@ if ( $Detailed.IsPresent )
             if ($_.Result -eq "Fail") {
                 $color = '31'
             } elseif ($_.Result -eq "Warning") {
-                $color = '32'
+                $color = '93'
             } else {
                 $color = '36'
             }

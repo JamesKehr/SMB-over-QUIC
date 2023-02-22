@@ -27,8 +27,14 @@ Adding as part of validation
 DONE - Valid lifetime (not expired)  : (Current date after NotBefore and before NotAfter certificate dates)
 DONE - Trusted certificate chain            : (Root and Intermediate CAs are trusted)
 
-Check cipher suites to ensure that TLS 1.3 suites are enabled. TLS 1.3 states that you cannot use downlevel cipher suites, so disabling TLS 1.3 suites breaks SMB over QUIC and possibly KDC Proxy.
-Validate that the OS is 2022 Azure Edition
+DONE - Check cipher suites to ensure that TLS 1.3 suites are enabled. TLS 1.3 states that you cannot use downlevel cipher suites, so disabling TLS 1.3 suites breaks SMB over QUIC and possibly KDC Proxy.
+DONE - Validate that the OS is 2022 Azure Edition
+
+DONE - Create a warning state for tests that fail due to technical reason. Started by creating the bones of the SoQState enum and the SoQResult class.
+
+IgnoreOS switch to bypass the OS test, which will allow validation of a certifiate to work anywhere. Helpful when someone is testing for certs that will work on an Azure Edition VM.
+
+Quiet - returns a $true or $false. This will require PowerShell 7!
 
 #>
 
@@ -52,6 +58,16 @@ param (
     [Parameter()]
     [switch]
     $Detailed,
+
+    # Ignore OS test. This allows you to test
+    [Parameter()]
+    [switch]
+    $IgnoreOS,
+
+    # Returns a true or false for a single certificate. Requires PowerShell 7!
+    [Parameter()]
+    [switch]
+    $Quiet,
 
     # Returns the SMB over QUIC certificate test object(s) to the console.
     [Parameter()]
@@ -109,18 +125,53 @@ class SoQCert {
 
 #>
 
+enum SoQState {
+    Pass
+    Fail
+    Warning
+}
 
-# Make sure this is a SMB over QUIC supported server OS.
-class SoQSupportedOS {
-    [bool]
+class SoQResult {
+    [SoQState]
     $IsValid
 
     [string]
-    $FailureReason = $null
+    $FailureReason
+
+    SoQResult() {
+        $this.IsValid       = "Warning"
+        $this.FailureReason = $null
+    }
+
+    SetValidity([SoQState]$Result) {
+        $this.IsValid = $Result
+    }
+
+    SetFailureReason([string]$FailureReason) {
+        $this.FailureReason = $FailureReason
+    }
+
+    AddToFailureReason([string]$FR) {
+        $this.FailureReason += $FR
+    }
+
+    [string]
+    ToString() {
+        return @"
+Valid: $($this.IsValid); FailureReason: $($this.FailureReason)
+"@
+    }
+}
+
+
+# Make sure this is a SMB over QUIC supported server OS.
+class SoQSupportedOS {
+    [SoQResult]
+    $Result = [SoQResult]::new()
 
     SoQSupportedOS() {
         Write-Verbose "SoQSupportedOS - Begin"
-        $this.IsValid = $true
+        $this.Result.SetValidity( "Pass" )
         $this.ValidateServerOS()
         Write-Verbose "SoQSupportedOS - End"
     }
@@ -141,43 +192,43 @@ class SoQSupportedOS {
         $osType = $wmiOS.ProductType
         Write-Verbose "SoQSupportedOS.ValidateServerOS - osType: $osType"
 
-        $this.FailureReason = ""
-        Write-Verbose "SoQSupportedOS.ValidateServerOS - Start - IsValid: $($this.IsValid); FailureReason: $($this.FailureReason)"
+        $this.Result.SetFailureReason("")
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - Start - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)"
 
         # must be server or DC product type
         if ( $osType -ne 2 -and $osType -ne 3 ) {
-            $this.IsValid = $false
-            $this.FailureReason += "Not Windows Server."
+            $this.Result.SetValidity( "Fail" )
+            $this.Result.AddToFailureReason( "Not Windows Server." )
         }
-        Write-Verbose "SoQSupportedOS.ValidateServerOS - ProductType - IsValid: $($this.IsValid); FailureReason: $($this.FailureReason)"
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - ProductType - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)"
 
         # must be Server 2022 or higher
         if ($osVer.Major -lt 10 -and $osVer.Build -lt 20348) {
-            $this.IsValid = $false
-            $this.FailureReason += " Not Windows Server 2022 or greater."
+            $this.Result.SetValidity( "Fail" )
+            $this.Result.AddToFailureReason( " Not Windows Server 2022 or greater." )
         } 
-        Write-Verbose "SoQSupportedOS.ValidateServerOS - Version - IsValid: $($this.IsValid); FailureReason: $($this.FailureReason)"
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - Version - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)"
         
         # the edition must be Azure Edition
         if ($osName -notmatch "Azure Edition") {
-            $this.IsValid = $false
-            $this.FailureReason += " Not Azure Edition."
+            $this.Result.SetValidity( "Fail" )
+            $this.Result.AddToFailureReason( " Not Azure Edition." )
         }
-        Write-Verbose "SoQSupportedOS.ValidateServerOS - Azure Edition - IsValid: $($this.IsValid); FailureReason: $($this.FailureReason)"
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - Azure Edition - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)"
 
         # clear failure reason if IsValid passed
-        if ( $this.IsValid ) {
-            $this.FailureReason = $null
+        if ( $this.Result.IsValid -eq "Pass" ) {
+            $this.Result.SetFailureReason( "" )
         }
-        Write-Verbose "SoQSupportedOS.ValidateServerOS - End - IsValid: $($this.IsValid); FailureReason: $($this.FailureReason)"
+        Write-Verbose "SoQSupportedOS.ValidateServerOS - End - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)"
     }
 
     [string]
     ToString() {
         return @"
 SupportedOS
-   Valid       : $($this.IsValid)
-   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+   Valid       : $($this.Result.IsValid)
+   $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" })
 "@
     }
 }
@@ -190,11 +241,8 @@ class SoQCertExpired {
     [datetime]
     $NotAfter
 
-    [bool]
-    $IsValid
-
-    [string]
-    $FailureReason = $null
+    [SoQResult]
+    $Result = [SoQResult]::new()
 
     SoQCertExpired(
         [System.Security.Cryptography.X509Certificates.X509Certificate]
@@ -202,30 +250,31 @@ class SoQCertExpired {
     )
     {
         Write-Debug "[SoQCertExpired] - Start"
-        $this.NotBefore   = $Certificate.NotBefore
-        $this.NotAfter    = $Certificate.NotAfter
+        $this.NotBefore      = $Certificate.NotBefore
+        $this.NotAfter       = $Certificate.NotAfter
         Write-Debug "[SoQCertExpired] - Validate"
-        $this.IsValid     = $this.ValidateDate()
+        $this.Result.SetValidity( $this.ValidateDate() )
         Write-Debug "[SoQCertExpired] - End"
     }
 
-    [bool]
+    [SoQState]
     ValidateDate()
     {
         Write-Debug "[SoQCertExpired].ValidateDate() - Start"
-        [bool]$isValidtmp = $false
+        [SoQState]$isValidtmp = "Fail"
         
         $date = Get-Date
         if ( $this.NotBefore -lt $date -and $this.NotAfter -gt $date )
         {
             Write-Debug "[SoQCertExpired].ValidateDate() - IsValid: True"
-            $isValidtmp = $true
+            $isValidtmp = "Pass"
         }
         else
         {
             Write-Debug "[SoQCertExpired].ValidateDate() - IsValid: False"
-            $this.FailureReason = "Certificate is expired. Expires: $($this.NotAfter.ToShortDateString()) $($this.NotAfter.ToShortTimeString()), Date: $($date.ToShortDateString()) $($date.ToShortTimeString())"
-            Write-Debug "[SoQCertExpired].ValidateDate() - Failure Reason: $($this.FailureReason)"
+            $FR = "Certificate is expired. Expires: $($this.NotAfter.ToShortDateString()) $($this.NotAfter.ToShortTimeString()), Date: $($date.ToShortDateString()) $($date.ToShortTimeString())"
+            $this.Result.SetFailureReason( $FR )
+            Write-Debug "[SoQCertExpired].ValidateDate() - Failure Reason: $($this.Result.FailureReason)"
             Write-Debug "[SoQCertExpired].ValidateDate() - NotBefore: $($this.NotBefore.ToString()), NotAfter: $($this.NotAfter.ToString()), Test Date: $($date.ToString()) "
         }
 
@@ -240,8 +289,8 @@ class SoQCertExpired {
 Valid Dates
    Not Before : $($this.NotBefore.ToShortDateString()) $($this.NotBefore.ToShortTimeString())
    Not After  : $($this.NotAfter.ToShortDateString()) $($this.NotAfter.ToShortTimeString())
-   Valid      : $($this.IsValid)
-   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+   Valid      : $($this.Result.IsValid)
+   $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" })
 "@
     }
 }
@@ -252,11 +301,8 @@ class SoQCertPurpose {
     [string[]]
     $Purpose
 
-    [bool]
-    $IsValid
-
-    [string]
-    $FailureReason = $null
+    [SoQResult]
+    $Result = [SoQResult]::new()
 
     SoQCertPurpose(
         [System.Security.Cryptography.X509Certificates.X509Certificate]
@@ -266,25 +312,25 @@ class SoQCertPurpose {
         Write-Debug "[SoQCertPurpose] - Start"
         $this.Purpose = $Certificate.EnhancedKeyUsageList.FriendlyName
         Write-Debug "[SoQCertPurpose] - Validate"
-        $this.IsValid = $this.ValidatePurpose()
+        $this.Result.SetValidity( $this.ValidatePurpose() )
         Write-Debug "[SoQCertPurpose] - End"
     }
 
-    [bool]
+    [SoQState]
     ValidatePurpose()
     {
         Write-Debug "[SoQCertPurpose].ValidatePurpose() - Start"
-        [bool]$isValidtmp = $false
+        [SoQState]$isValidtmp = "Fail"
 
         if ( $this.Purpose -contains "Server Authentication")
         {
             Write-Debug "[SoQCertPurpose].ValidatePurpose() - IsValid: True"
-            $isValidtmp = $true
+            $isValidtmp = "Pass"
         }
         else 
         {
             Write-Debug "[SoQCertPurpose].ValidatePurpose() - IsValid: False"
-            $this.FailureReason = "Purpose does not contain Server Authentication. Purpose: $($this.Purpose -join ', ')"
+            $this.Result.SetFailureReason( "Purpose does not contain Server Authentication. Purpose: $($this.Purpose -join ', ')" )
             Write-Debug "[SoQCertPurpose].ValidatePurpose() - Failure Reason: $($this.FailureReason)"
             Write-Debug "[SoQCertPurpose].ValidatePurpose() - Purpose: $($this.Purpose), Must contain: Server Authentication"
         }
@@ -299,8 +345,8 @@ class SoQCertPurpose {
         return @"
 Purpose
    Purpose : $($this.Purpose -join ', ')
-   Valid   : $($this.IsValid)
-   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+   Valid   : $($this.Result.IsValid)
+   $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" })
 "@
     }
 }
@@ -311,11 +357,8 @@ class SoQCertKeyUsage {
     [string]
     $KeyUsage
 
-    [bool]
-    $IsValid
-
-    [string]
-    $FailureReason = $null
+    [SoQResult]
+    $Result = [SoQResult]::new()
 
     SoQCertKeyUsage(
         [System.Security.Cryptography.X509Certificates.X509Certificate]
@@ -335,26 +378,26 @@ class SoQCertKeyUsage {
         }
         
         Write-Debug "[SoQCertKeyUsage] - Validate"
-        $this.IsValid  = $this.ValidateKeyUsage()
+        $this.Result.SetValidity( $this.ValidateKeyUsage() )
         Write-Debug "[SoQCertKeyUsage] - End"
     }
 
-    [bool]
+    [SoqState]
     ValidateKeyUsage()
     {
         Write-Debug "[SoQCertKeyUsage].ValidateKeyUsage() - Start"
-        [bool]$isValidtmp = $false
+        [SoqState]$isValidtmp = "Fail"
 
         if ( $this.KeyUsage -match "Digital Signature" )
         {
             Write-Debug "[SoQCertKeyUsage].ValidateKeyUsage() - IsValid: True"
-            $isValidtmp = $true
+            $isValidtmp = "Pass"
         }
         else 
         {
             Write-Debug "[SoQCertKeyUsage].ValidateKeyUsage() - IsValid: False"
-            $this.FailureReason = "Key Usage does not contain Digital Signature. ($($this.KeyUsage))"
-            Write-Debug "[SoQCertKeyUsage].ValidateKeyUsage() - Failure Reason: $($this.FailureReason)"
+            $this.Result.SetFailureReason( "Key Usage does not contain Digital Signature. ($($this.KeyUsage))" )
+            Write-Debug "[SoQCertKeyUsage].ValidateKeyUsage() - Failure Reason: $($this.Result.FailureReason)"
             Write-Debug "[SoQCertKeyUsage].ValidateKeyUsage() - KeyUsage: $($this.KeyUsage), Requires: Digital Signature"
         }
 
@@ -368,8 +411,8 @@ class SoQCertKeyUsage {
         return @"
 Key Usage
    Key Usage : $($this.KeyUsage.TrimEnd("`n`r"))
-   Valid     : $($this.IsValid)
-   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+   Valid     : $($this.Result.IsValid)
+   $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" })
 "@
     }
 }
@@ -379,11 +422,8 @@ class SoQCertSubject {
     [string]
     $Subject
 
-    [bool]
-    $IsValid
-
-    [string]
-    $FailureReason = $null
+    [SoQResult]
+    $Result = [SoQResult]::new()
 
     # regex expressions for Subject
     [regex] hidden static 
@@ -397,26 +437,26 @@ class SoQCertSubject {
         Write-Debug "[SoQCertSubject] - Start"
         $this.Subject = $Certificate.Subject
         Write-Debug "[SoQCertSubject] - Validate"
-        $this.IsValid = $this.ValidateSubject()
+        $this.Result.SetValidity( $this.ValidateSubject() )
         Write-Debug "[SoQCertSubject] - End"
     }
 
-    [bool]
+    [SoQState]
     ValidateSubject()
     {
         Write-Debug "[SoQCertSubject].ValidateSubject() - Start"
-        [bool]$isValidtmp = $false
+        [SoQState]$isValidtmp = "Fail"
 
         if ( $this.Subject -match $this.rgxSubject )
         {
             Write-Debug "[SoQCertSubject].ValidateSubject() - IsValid: True"
-            $isValidtmp = $true
+            $isValidtmp = "Pass"
         }
         else 
         {
             Write-Debug "[SoQCertSubject].ValidateSubject() - IsValid: False"
-            $this.FailureReason = "Does not contain a Subject. ($($this.Subject))"
-            Write-Debug "[SoQCertSubject].ValidateSubject() - Failure Reason: $($this.FailureReason)"
+            $this.Result.SetFailureReason( "Does not contain a Subject. ($($this.Subject))" )
+            Write-Debug "[SoQCertSubject].ValidateSubject() - Failure Reason: $($this.Result.FailureReason)"
             Write-Debug "[SoQCertSubject].ValidateSubject() - Subject: $($this.Subject), Requires: CN=<some text>"
         }
 
@@ -430,8 +470,8 @@ class SoQCertSubject {
         return @"
 Subject
    Subject : $($this.Subject)
-   Valid   : $($this.IsValid)
-   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+   Valid   : $($this.Result.IsValid)
+   $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" })
 "@
     }
 }
@@ -441,11 +481,8 @@ class SoQCertSAN {
     [string[]]
     $SubjectAltName
 
-    [bool]
-    $IsValid
-
-    [string]
-    $FailureReason = $null
+    [SoQResult]
+    $Result = [SoQResult]::new()
 
     SoQCertSAN(
         [System.Security.Cryptography.X509Certificates.X509Certificate]
@@ -455,26 +492,26 @@ class SoQCertSAN {
         Write-Debug "[SoQCertSAN] - Start"
         $this.SubjectAltName = $Certificate.DnsNameList.Unicode
         Write-Debug "[SoQCertSAN] - Validate"
-        $this.IsValid        = $this.ValidateSAN()
+        $this.Result.SetValidity( $this.ValidateSAN() )
         Write-Debug "[SoQCertSAN] - End"
     }
 
-    [bool]
+    [SoQState]
     ValidateSAN()
     {
         Write-Debug "[SoQCertSAN].ValidateSAN() - Start"
-        [bool]$isValidtmp = $false
+        [SoQState]$isValidtmp = "Fail"
 
         if ( ($this.SubjectAltName).Count -ge 1 )
         {
             Write-Debug "[SoQCertSAN].ValidateSAN() - IsValid: True"
-            $isValidtmp = $true
+            $isValidtmp = "Pass"
         }
         else 
         {
             Write-Debug "[SoQCertSAN].ValidateSAN() - IsValid: False"
-            $this.FailureReason = "No Subject Alternative Names. ($($this.SubjectAltName -join ', '))"
-            Write-Debug "[SoQCertSAN].ValidateSAN() - Failure Reason: $($this.FailureReason)"
+            $this.Result.SetFailureReason( "No Subject Alternative Names. ($($this.SubjectAltName -join ', '))" )
+            Write-Debug "[SoQCertSAN].ValidateSAN() - Failure Reason: $($this.Result.FailureReason)"
             Write-Debug "[SoQCertSAN].ValidateSAN() - SubjectAltName: $($this.SubjectAltName -join ', '); Count: $(($this.SubjectAltName).Count); Count >= 1."
         }
 
@@ -488,19 +525,16 @@ class SoQCertSAN {
         return @"
 Subject Alternative Name (DNS)
    DNS List : $($this.SubjectAltName -join ', ')
-   Valid    : $($this.IsValid)
-   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+   Valid    : $($this.Result.IsValid)
+   $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" })
 "@
     }
 }
 
 # The private key must be installed
 class SoQCertPrivateKey {
-    [bool]
-    $IsValid
-
-    [string]
-    $FailureReason = $null
+    [SoQResult]
+    $Result = [SoQResult]::new()
 
     SoQCertPrivateKey(
         [System.Security.Cryptography.X509Certificates.X509Certificate]
@@ -508,19 +542,16 @@ class SoQCertPrivateKey {
     )
     {
         Write-Debug "[SoQCertPrivateKey] - Start"
-        $this.IsValid = $Certificate.HasPrivateKey
-
-        if ( $Certificate.HasPrivateKey -eq $false)
-        {
+        if ($Certificate.HasPrivateKey) {
+            $this.Result.SetValidity( "Pass" )
+            Write-Debug "[SoQCertPrivateKey] - IsValid: True"
+        } else {
             Write-Debug "[SoQCertPrivateKey] - IsValid: False"
-            $this.FailureReason = "No Private Key."
-            Write-Debug "[SoQCertPrivateKey] - Failure Reason: $($this.FailureReason)"
+            $this.Result.SetFailureReason( "No Private Key." )
+            Write-Debug "[SoQCertPrivateKey] - Failure Reason: $($this.Result.FailureReason)"
             Write-Debug "[SoQCertPrivateKey] - HasPrivateKey: False"
         }
-        else 
-        {
-            Write-Debug "[SoQCertPrivateKey] - IsValid: True"
-        }
+
         Write-Debug "[SoQCertPrivateKey] - End"
     }
 
@@ -529,8 +560,8 @@ class SoQCertPrivateKey {
     {
         return @"
 Private Key
-   HasPrivateKey : $($this.IsValid)
-   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" }) 
+   HasPrivateKey : $($this.Result.IsValid)
+   $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" }) 
 "@
     }
 }
@@ -540,11 +571,8 @@ class SoQCertSignatureAlgorithm {
     [string]
     $SignatureAlgorithm
 
-    [bool]
-    $IsValid
-
-    [string]
-    $FailureReason = $null
+    [SoQResult]
+    $Result = [SoQResult]::new()
 
     SoQCertSignatureAlgorithm(
         [System.Security.Cryptography.X509Certificates.X509Certificate]
@@ -554,7 +582,7 @@ class SoQCertSignatureAlgorithm {
         Write-Debug "[SoQCertSignatureAlgorithm] - Start"
         $this.SignatureAlgorithm = $Certificate.SignatureAlgorithm.FriendlyName
         Write-Debug "[SoQCertSignatureAlgorithm] - Validate"
-        $this.IsValid            = $this.ValidateSignatureAlgorithm()
+        $this.Result.SetValidity( $this.ValidateSignatureAlgorithm() )
         Write-Debug "[SoQCertSignatureAlgorithm] - End"
     }
 
@@ -567,23 +595,23 @@ class SoQCertSignatureAlgorithm {
         return @("sha256ECDSA", "sha384ECDSA", "sha512ECDSA", "sha256RSA", "sha384RSA", "sha512RSA")
     }
 
-    [bool]
+    [SoQState]
     ValidateSignatureAlgorithm()
     {
         Write-Debug "[SoQCertSignatureAlgorithm].ValidateSignatureAlgorithm() - Start"
-        [bool]$isValidtmp = $false
+        [SoQState]$isValidtmp = "Fail"
 
         if ( $this.SignatureAlgorithm -in $this.GetValidSigAlgo() )
         {
 
             Write-Debug "[SoQCertSignatureAlgorithm].ValidateSignatureAlgorithm() - IsValid: True"
-            $isValidtmp = $true
+            $isValidtmp = "Pass"
         }
         else 
         {
             Write-Debug "[SoQCertSignatureAlgorithm].ValidateSignatureAlgorithm() - IsValid: False"
-            $this.FailureReason = "Uses a Signature Algorithm not known to work. ($($this.SignatureAlgorithm))"
-            Write-Debug "[SoQCertSignatureAlgorithm].ValidateSignatureAlgorithm() - Failure Reason: $($this.FailureReason)"
+            $this.Result.SetFailureReason( "Uses a Signature Algorithm not known to work. ($($this.SignatureAlgorithm))" )
+            Write-Debug "[SoQCertSignatureAlgorithm].ValidateSignatureAlgorithm() - Failure Reason: $($this.Result.FailureReason)"
             Write-Debug "[SoQCertSignatureAlgorithm].ValidateSignatureAlgorithm() - SignatureAlgorithm: $($this.SignatureAlgorithm), Valid Range: $($this.GetValidSigAlgo() -join ', ')"
         }
 
@@ -597,8 +625,8 @@ class SoQCertSignatureAlgorithm {
         return @"
 Signature Algorithm
    SignatureAlgorithm : $($this.SignatureAlgorithm)
-   Valid              : $($this.IsValid)
-   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+   Valid              : $($this.Result.IsValid)
+   $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" })
 "@
     }
 }
@@ -608,11 +636,8 @@ class SoQCertSignatureHash {
     [string]
     $SignatureHash
 
-    [bool]
-    $IsValid
-
-    [string]
-    $FailureReason = $null
+    [SoQResult]
+    $Result = [SoQResult]::new()
 
     SoQCertSignatureHash(
         [System.Security.Cryptography.X509Certificates.X509Certificate]
@@ -622,7 +647,7 @@ class SoQCertSignatureHash {
         Write-Debug "[SoQCertSignatureHash] - Start"
         $this.SignatureHash  = $this.GetHashString($Certificate)
         Write-Debug "[SoQCertSignatureHash] - Validate"
-        $this.IsValid        = $this.ValidateSigHash()
+        $this.Result.SetValidity( $this.ValidateSigHash() )
         Write-Debug "[SoQCertSignatureHash] - End"
     }
 
@@ -653,22 +678,22 @@ class SoQCertSignatureHash {
         return $strHash
     }
 
-    [bool]
+    [SoQState]
     ValidateSigHash()
     {
         Write-Debug "[SoQCertSignatureHash].ValidateSigHash() - Start"
-        [bool]$isValidtmp = $false
+        [SoQState]$isValidtmp = "Fail"
 
         if ( $this.SignatureHash -in $this.GetValidHash() )
         {
             Write-Debug "[SoQCertSignatureHash].ValidateSigHash() - IsValid: True"
-            $isValidtmp = $true
+            $isValidtmp = "Pass"
         }
         else 
         {
             Write-Debug "[SoQCertSignatureHash].ValidateSigHash() - IsValid: False"
-            $this.FailureReason = "Not a valid signature hash. ($($this.SignatureHash))"
-            Write-Debug "[SoQCertSignatureHash].ValidateSigHash() - Failure Reason: $($this.FailureReason)"
+            $this.Result.SetFailureReason( "Not a valid signature hash. ($($this.SignatureHash))" )
+            Write-Debug "[SoQCertSignatureHash].ValidateSigHash() - Failure Reason: $($this.Result.FailureReason)"
             Write-Debug "[SoQCertSignatureHash].ValidateSigHash() - SignatureHash: $($this.SignatureHash), Valid Range: $($this.GetValidHash() -join ', ')"
         }
 
@@ -682,8 +707,8 @@ class SoQCertSignatureHash {
         return @"
 Signature Hash
    Hash  : $($this.SignatureHash)
-   Valid : $($this.IsValid)
-   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+   Valid : $($this.Result.IsValid)
+   $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" })
 "@
     }
 }
@@ -693,11 +718,8 @@ class SoQCertPublicKeyAlgorithm {
     [string]
     $PublicKeyAlgorithm
 
-    [bool]
-    $IsValid
-
-    [string]
-    $FailureReason = $null
+    [SoQResult]
+    $Result = [SoQResult]::new()
 
     SoQCertPublicKeyAlgorithm(
         [System.Security.Cryptography.X509Certificates.X509Certificate]
@@ -707,7 +729,7 @@ class SoQCertPublicKeyAlgorithm {
         Write-Debug "[SoQCertPublicKeyAlgorithm] - Start"
         $this.PublicKeyAlgorithm = $this.GetPKAString($Certificate)
         Write-Debug "[SoQCertPublicKeyAlgorithm] - Validate"
-        $this.IsValid            = $this.ValidatePKA()
+        $this.Result.SetValidity( $this.ValidatePKA() )
         Write-Debug "[SoQCertPublicKeyAlgorithm] - End"
     }
 
@@ -805,7 +827,7 @@ class SoQCertPublicKeyAlgorithm {
                 $pka = "$provider$size"
             } else {
                 $pka = "Unknown"
-                $this.FailureReason = "Legacy Windows PowerShell 5.1 cannot decode ECDSA and ECDH public keys. Please try again with PowerShell 7."
+                $this.Result.SetFailureReason( "Legacy Windows PowerShell 5.1 cannot decode ECDSA and ECDH public keys. Please try again with PowerShell 7." )
             }
 
             
@@ -823,28 +845,28 @@ class SoQCertPublicKeyAlgorithm {
         return @("ECDSA_P256", "ECDSA_P384", "ECDSA_P512", "RSA2048", "RSA4096")
     }
 
-    [bool]
+    [SoQState]
     ValidatePKA()
     {
         Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - Start"
-        [bool]$isValidtmp = $false
+        [SoQState]$isValidtmp = "Fail"
 
-        if ($this.FailureReason) {
+        if ( $this.Result.FailureReason ) {
             # Detection will fail when PowerShell 5.1 is used and the PKA is EC-based. 
             # Use that FailureReason and return $false
-            Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - IsValid: False"
-            $isValidtmp = $false
-            Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - Failure Reason: $($this.FailureReason)"
+            Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - IsValid: Warning"
+            $isValidtmp = "Warning"
+            Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - Warning Reason: $($this.Result.FailureReason)"
         } elseif ( $this.PublicKeyAlgorithm -in $this.GetValidPKA() )
         {
             Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - IsValid: True"
-            $isValidtmp = $true
+            $isValidtmp = "Pass"
         }
         else 
         {
             Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - IsValid: False"
-            $this.FailureReason = "Not a known supported Public Key Algorithm. ($($this.PublicKeyAlgorithm))"
-            Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - Failure Reason: $($this.FailureReason)"
+            $this.Result.SetFailureReason( "Not a known supported Public Key Algorithm. ($($this.PublicKeyAlgorithm))" )
+            Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - Failure Reason: $($this.Result.FailureReason)"
             Write-Debug "[SoQCertPublicKeyAlgorithm].ValidatePKA() - PublicKeyAlgorithm: $($this.PublicKeyAlgorithm), Valid Range: $($this.GetValidPKA() -join ', ')"
         }
 
@@ -858,19 +880,16 @@ class SoQCertPublicKeyAlgorithm {
         return @"
 Public Key Algorithm     
    PKA   : $($this.PublicKeyAlgorithm)
-   Valid : $($this.IsValid)
-   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+   Valid : $($this.Result.IsValid)
+   $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" })
 "@
     }
 }
 
 # The certificate chain must be trusted
 class SoQCertCertChain {
-    [bool]
-    $IsValid
-
-    [string]
-    $FailureReason = $null
+    [SoQResult]
+    $Result = [SoQResult]::new()
 
     SoQCertCertChain(
         [System.Security.Cryptography.X509Certificates.X509Certificate]
@@ -879,15 +898,15 @@ class SoQCertCertChain {
     {
         Write-Debug "[SoQCertCertChain] - Start"
         Write-Debug "[SoQCertCertChain] - Validate"
-        $this.IsValid = $this.ValidateCertChain($Certificate)
+        $this.Result.SetValidity( $this.ValidateCertChain($Certificate) )
         Write-Debug "[SoQCertCertChain] - End"
     }
 
-    [bool]
+    [SoQState]
     ValidateCertChain([System.Security.Cryptography.X509Certificates.X509Certificate]$Certificate)
     {
         Write-Debug "[SoQCertCertChain].ValidateCertChain() - Start"
-        [bool]$isValidtmp = $false
+        [SoQState]$isValidtmp = "Fail"
 
         ## let certutil handle cert chain validation ##
         # export the cer file
@@ -907,14 +926,14 @@ class SoQCertCertChain {
 
         # validation is true if CERT_E_UNTRUSTEDROOT is not in the output
         if ( -NOT ($results | Where-Object { $_ -match 'CERT_E_UNTRUSTEDROOT' }) ) {
-            Write-Debug "[SoQCertCertChain].ValidateCertChain() - IsValid: True"
-            $isValidtmp = $true
+            Write-Debug "[SoQCertCertChain].ValidateCertChain() - IsValid: Pass"
+            $isValidtmp = "Pass"
         }
         else 
         {
-            Write-Debug "[SoQCertCertChain].ValidateCertChain() - IsValid: False"
-            $this.FailureReason = "Certificate chain validation failed. 'certutil -verify' returned error CERT_E_UNTRUSTEDROOT."
-            Write-Debug "[SoQCertCertChain].ValidateCertChain() - Failure Reason: $($this.FailureReason)"
+            Write-Debug "[SoQCertCertChain].ValidateCertChain() - IsValid: Fail"
+            $this.Result.SetFailureReason( "Certificate chain validation failed. 'certutil -verify' returned error CERT_E_UNTRUSTEDROOT." )
+            Write-Debug "[SoQCertCertChain].ValidateCertChain() - Failure Reason: $($this.Result.FailureReason)"
             Write-Debug "[SoQCertCertChain].ValidateCertChain() - CERT_E_UNTRUSTEDROOT:`n$(($results | Where-Object { $_ -match 'CERT_E_UNTRUSTEDROOT' }) -join "`n")`n`n "
         }
 
@@ -927,8 +946,8 @@ class SoQCertCertChain {
     {
         return @"
 Certificate Chain
-   ValidCertChain : $($this.IsValid)
-   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+   ValidCertChain : $($this.Result.IsValid)
+   $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" })
 "@
     }
 }
@@ -996,11 +1015,8 @@ class SoQTls13Support {
     [array]
     $Tls13CipherSuites
 
-    [bool]
-    $isValid
-
-    [string]
-    $FailureReason = $null
+    [SoQResult]
+    $Result = [SoQResult]::new()
 
     SoQTls13Support() {
         Write-Verbose "SoQTls13Support - Begin"
@@ -1194,17 +1210,17 @@ class SoQTls13Support {
 
             if ($fndValidTls13Suite) {
                 Write-Verbose "SoQTls13Support.ValidateLocalCipherSuite() - Validation passed."
-                $this.isValid = $true
+                $this.Result.SetValidity( "Pass" )
             } else {
                 Write-Verbose "SoQTls13Support.ValidateLocalCipherSuite() - Validation failed."
-                $this.isValid = $false
+                $this.Result.SetValidity( "Fail" )
                 $this.FailureReason = "The 'SSL Cipher Suite Order' policy has been modified and does not include a TLS 1.3 compatible cipher suite. See: https://learn.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-server-2022"
             }
 
         } else {
             Write-Verbose "SoQTls13Support.ValidateLocalCipherSuite() - Policy is default. Accepting this as a pass."
             # no special cipher policy is installed, the default will be compatible.
-            $this.isValid = $true
+            $this.Result.SetValidity( "Pass" )
         }
         Write-Verbose "SoQTls13Support.ValidateLocalCipherSuite() - End"
     }
@@ -1214,8 +1230,8 @@ class SoQTls13Support {
         return @"
 SoQTls13Support
    Tls13CipherSuites : $($this.Tls13CipherSuites.TlsString -join ',') 
-   Valid           : $($this.isValid)
-   $( if (-NOT $this.IsValid) { "FailureReason : $($this.FailureReason)" })
+   Valid             : $($this.Result.IsValid)
+   $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" })
 "@
     }
 }
@@ -1227,7 +1243,7 @@ class SoQCertValidation {
     [System.Security.Cryptography.X509Certificates.X509Certificate]
     $Certificate
 
-    [bool]
+    [SoQState]
     $IsValid
 
     [string[]]
@@ -1269,14 +1285,23 @@ class SoQCertValidation {
     [SoQTls13Support]
     $Tls13Support
 
+    [bool]
+    hidden $IgnoreOS
 
-    SoQCertValidation([System.Security.Cryptography.X509Certificates.X509Certificate]$Certificate)
+
+    SoQCertValidation([System.Security.Cryptography.X509Certificates.X509Certificate]$Certificate, $IgnoreOS)
     {
         Write-Debug "[SoQCertValidation] - Start"
         $this.Certificate        = $Certificate
         Write-Debug "[SoQCertValidation] - Thumbprint: $($this.Certificate.Thumbprint), Subject: $($this.Certificate.Subject)"
-        Write-Debug "[SoQCertValidation] - SupportedOS"
-        $this.SupportedOS        = [SoQSupportedOS]::new()
+        Write-Debug "[SoQSupportedOS] - SupportedOS"
+        if ($IgnoreOS) {
+            $this.IgnoreOS           = $true
+            $this.SupportedOS        = $null
+        } else {
+            $this.IgnoreOS           = $false
+            $this.SupportedOS        = [SoQSupportedOS]::new()
+        }
         Write-Debug "[SoQCertValidation] - Expiration"
         $this.Expiration         = [SoQCertExpired]::new($Certificate)
         Write-Debug "[SoQCertValidation] - Purpose"
@@ -1308,14 +1333,18 @@ class SoQCertValidation {
     [string[]]
     GetSubclassVariables()
     {
-        return [string[]]("SupportedOS","Expiration","Purpose","KeyUsage","Subject","SubjectAltName","PrivateKey","SignatureAlgorithm","SignatureHash","PublicKeyAlgorithm","CertChain","Tls13Support")
+        if ($this.IgnoreOS) {
+            return [string[]]("Expiration","Purpose","KeyUsage","Subject","SubjectAltName","PrivateKey","SignatureAlgorithm","SignatureHash","PublicKeyAlgorithm","CertChain","Tls13Support")
+        } else {
+            return [string[]]("SupportedOS","Expiration","Purpose","KeyUsage","Subject","SubjectAltName","PrivateKey","SignatureAlgorithm","SignatureHash","PublicKeyAlgorithm","CertChain","Tls13Support")
+        }
     }
 
-    [bool]
+    [SoQState]
     ValidateSoQCert()
     {
         Write-Debug "[SoQCertValidation].ValidateSoQCert() - Start"
-        $valid = $true
+        [SoQState]$valid = "Pass"
         $tests = $this.GetSubclassVariables()
 
         $theLongestLen = 0
@@ -1323,11 +1352,19 @@ class SoQCertValidation {
 
         foreach ( $test in $tests )
         {
-            Write-Verbose "[SoQCertValidation].ValidateSoQCert() - Testing $($test.PadRight($theLongestLen, " ")) : $($this."$test".IsValid)"
-            if ($this."$test".IsValid -eq $false) { 
-                $valid = $false 
+            Write-Verbose "[SoQCertValidation].ValidateSoQCert() - Testing $($test.PadRight($theLongestLen, " ")) : $($this."$test".Result.IsValid)"
+            if ($this."$test".Result.IsValid -eq "Fail") { 
+                $valid = "Fail" 
                 $this.FailedTests += $test
-                Write-Verbose "[SoQCertValidation].ValidateSoQCert() - Failure reason: $($this."$test".FailureReason)"
+                Write-Verbose "[SoQCertValidation].ValidateSoQCert() - Failure reason: $($this."$test".Result.FailureReason)"
+            } elseif ($this."$test".Result.IsValid -eq "Warning") { 
+                # do not overwrite the Fail state
+                if ($valid -ne "Fail") {
+                    $valid = "Warning"
+                }
+
+                $this.FailedTests += $test
+                Write-Verbose "[SoQCertValidation].ValidateSoQCert() - Warning reason: $($this."$test".Result.FailureReason)"
             }
         }
 
@@ -1339,6 +1376,21 @@ class SoQCertValidation {
     [string]
     ToString()
     {
+        if ($this.IgnoreOS) {
+            return @"
+Thumbprint: $($this.Certificate.Thumbprint)
+$($this.Expiration.ToString())
+$($this.Purpose.ToString())
+$($this.KeyUsage.ToString())
+$($this.Subject.ToString())
+$($this.SubjectAltName.ToString())
+$($this.PrivateKey.ToString())
+$($this.SignatureAlgorithm.ToString())
+$($this.SignatureHash.ToString())
+$($this.PublicKeyAlgorithm.ToString())
+$($this.CertChain.ToString())
+"@
+        } else {
         return @"
 Thumbprint: $($this.Certificate.Thumbprint)
 $($this.SupportedOS.ToString())
@@ -1353,6 +1405,7 @@ $($this.SignatureHash.ToString())
 $($this.PublicKeyAlgorithm.ToString())
 $($this.CertChain.ToString())
 "@
+        }
     }
     
 }
@@ -1367,7 +1420,42 @@ $($this.CertChain.ToString())
 $script:psVerMaj = $Host.Version.Major
 if ( $scipt:psVerMaj -eq 5 )
 {
-    Write-Host -ForegroundColor Yellow "Please use PowerShell 7 for the best experience. The .NET certificate namespaces used by Windows PowerShell 5.1 are not as robust as .NET 7. This requires some guess work when using PowerShell 5.1. `n`nhttps://aka.ms/powershell"
+    Write-Warning "Please use PowerShell 7 for the best experience. The .NET certificate namespaces used by Windows PowerShell 5.1 cannot full parse certificate details. `n`nhttps://aka.ms/powershell"
+}
+
+<# 
+Run in a special mode if -Quiet is set.
+
+- Must be PowerShell 7.
+- Must have a thumbprint. Only a single cert is supported.
+
+#>
+if ($Quiet.IsPresent) {
+    if ($Host.Version.Major -lt 7) {
+        return ( Write-Error "Quiet mode only works on PowerShell 7." -EA Stop )
+    }
+
+    if ( [string]::IsNullOrEmpty($Thumbprint) ) {
+        return ( Write-Error "Quiet mode requires a Thumbprint be set." -EA Stop )
+    }
+
+    # perform work
+    # grab the cert
+    try {
+        $cert = Get-Item "Cert:\LocalMachine\My\$Thumbprint" -EA Stop
+    } catch {
+        return ( Write-Error "Failed to find a certificate in LocalMachine\My with the Thumbprint $Thumbprint." -EA Stop )
+    }
+
+    # run the tests
+    $tmpCert = [SoQCertValidation]::new($cert, $IgnoreOS.IsPresent)
+
+    if ($tmpCert.IsValid -eq "Pass") {
+        return $true
+    } else {
+        return $false
+    }
+
 }
 
 # stores the certificate(s) being tested
@@ -1397,7 +1485,7 @@ foreach ( $cert in $tmpCerts)
 {
     try {
         Write-Verbose "Main - Testing $($cert.Thumbprint) ($(($cert.Subject)))"
-        $tmpCert = [SoQCertValidation]::new($cert)
+        $tmpCert = [SoQCertValidation]::new($cert, $IgnoreOS.IsPresent)
         $certs += $tmpCert
         Remove-Variable tmpCert
     }
@@ -1422,8 +1510,8 @@ if ( $Detailed.IsPresent )
         {
             $obj = [PSCustomObject]@{
                 Test          = $test
-                Pass          = $cert."$test".IsValid
-                FailureReason = $cert."$test".FailureReason
+                Result        = $cert."$test".Result.IsValid
+                FailureReason = $cert."$test".Result.FailureReason
             }
 
             $table += $obj
@@ -1432,26 +1520,32 @@ if ( $Detailed.IsPresent )
         }
         
 
-        if ($cert.IsValid)
-        {
-            Write-Host -ForegroundColor Green "`nThumbprint: $($cert.Certificate.Thumbprint), Subject: $($cert.Subject.Subject), IsValid: $($cert.IsValid)"   
-        }
-        else 
-        {
-            Write-Host -ForegroundColor Red "`nThumbprint: $($cert.Certificate.Thumbprint), Subject: $($cert.Subject.Subject), IsValid: $($cert.IsValid)"
+        if ($cert.IsValid -eq "Pass") {
+            Write-Host -ForegroundColor Green "`nThumbprint: $($cert.Certificate.Thumbprint), Subject: $($cert.Subject.Subject), Result: $($cert.IsValid)"   
+        } elseif ($cert.IsValid -eq "Fail") {
+            Write-Host -ForegroundColor Red "`nThumbprint: $($cert.Certificate.Thumbprint), Subject: $($cert.Subject.Subject), Result: $($cert.IsValid)"
+        } else {
+            Write-Host -ForegroundColor Yellow "`nThumbprint: $($cert.Certificate.Thumbprint), Subject: $($cert.Subject.Subject), Result: $($cert.IsValid)"
         }
 
-        $table | Format-Table -AutoSize -Property Test, @{Label="Pass"; Expression={
-            if ($_.Pass)
-            {
+        $table | Format-Table -AutoSize -Property Test, @{Label="Result"; Expression={
+            if ($_.Result -eq "Pass") {
                 $color = '36'
-            } else {
+            } elseif ($_.Result -eq "Fail") {
                 $color = '31'
+            } else {
+                $color = '32'
             }
             $e = [char]27
-           "$e[${color}m$($_.Pass)${e}[0m"
+           "$e[${color}m$($_.Result)${e}[0m"
         }}, @{Label="FailureReason"; Expression={
-            $color = '31'
+            if ($_.Result -eq "Fail") {
+                $color = '31'
+            } elseif ($_.Result -eq "Warning") {
+                $color = '32'
+            } else {
+                $color = '36'
+            }
             $e = [char]27
            "$e[${color}m$($_.FailureReason)${e}[0m"
         }}

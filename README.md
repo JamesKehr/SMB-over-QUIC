@@ -3,7 +3,8 @@ Runs basic checks to on a certificate, or the LocalMachine\My store, to verify w
 
 This script works best with PowerShell 7+. PowerShell 7 is the preferred method because .NET 7 has better certificate methods, which guarantees better accuracy. Legacy Windows PowerShell 5.1 will work with limited functionality.
 
-**Warning**
+:warning: **Warning** :warning:
+
 Some functionality will not work on legacy Windows PowerShell 5.1; such as, ECDSA public key algorithm detection and Quiet mode. 
 
 

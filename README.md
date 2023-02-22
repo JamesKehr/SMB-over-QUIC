@@ -1,5 +1,5 @@
 # Validate-SoQCertificate
-Runs basic checks to on a certificate, or the LocalMachine\My store, to verify whether a certificate is SMB over QUIC compatible.
+Runs basic checks on a certificate, or the entire LocalMachine\My store, to verify whether a certificate is SMB over QUIC (TLS 1.3) compatible.
 
 This script works best with PowerShell 7+. PowerShell 7 is the preferred method because .NET 7 has better certificate methods, which guarantees better accuracy. Legacy Windows PowerShell 5.1 will work with limited functionality.
 

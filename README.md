@@ -1,7 +1,11 @@
 # Validate-SoQCertificate
 Runs basic checks to on a certificate, or the LocalMachine\My store, to verify whether a certificate is SMB over QUIC compatible.
 
-This script works PowerShell 5.1 or 7+. PowerShell 7 is the preferred method because .NET 7 has better certificate methods, which guarantees better accuracy.
+This script works best with PowerShell 7+. PowerShell 7 is the preferred method because .NET 7 has better certificate methods, which guarantees better accuracy. Legacy Windows PowerShell 5.1 will work with limited functionality.
+
+**Warning**
+Some functionality will not work on legacy Windows PowerShell 5.1; such as, ECDSA public key algorithm detection and Quiet mode. 
+
 
 ```powershell
 # download the script
@@ -22,6 +26,30 @@ iwr https://raw.githubusercontent.com/JamesKehr/Validate-SoQCertificate/main/Val
 # test a single certificate with detailed results
 .\Validate-SoQCertificate.ps1 -Thumbprint <thumbprint> -Detailed
 
+
+### IgnoreOS ###
+# test a certificate on a non-Azure Edition system for validation purposes
+# with detailed output.
+.\Validate-SoQCertificate.ps1 -Thumbprint <thumbprint> -Detailed -IgnoreOS
+
+
+### Quiet mode ###
+# return a boolean ($true or $false)
+# Requires:
+#    - PowerShell 7
+#    - Thumbprint
+# Optional:
+#    - IgnoreOS
+# Ignores:
+#    - Detailed
+#    - PassThru
+.\Validate-SoQCertificate.ps1 -Thumbprint <thumbprint> -Quiet
+
+
+### Passthru mode ###
+# returns the [SoQCertValidation] object(s)
+# Detailed is ignored.
+$isCertSoQValid = .\Validate-SoQCertificate.ps1 -Thumbprint <thumbprint> -Passthru
 
 ### Troubleshooting ###
 # run with verbose output, shows where certificates fail a test.
@@ -48,4 +76,4 @@ if ($Host.Version.Major -ge 7) {
 
 ## NOTE
 
-This script is in beta and not fully validated. Results are currently not guaranteed to be accurate. Though they should be mostly accurate.
+This script is in beta and not fully validated. Results are currently not guaranteed to be accurate. Though they should be accurate when using PowerShell 7.

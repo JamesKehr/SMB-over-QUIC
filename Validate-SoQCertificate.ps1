@@ -1528,6 +1528,7 @@ if ( $Detailed.IsPresent )
             Write-Host -ForegroundColor Yellow "`nThumbprint: $($cert.Certificate.Thumbprint), Subject: $($cert.Subject.Subject), Result: $($cert.IsValid)"
         }
 
+        # https://ss64.com/nt/syntax-ansi.html
         $table | Format-Table -AutoSize -Property Test, @{Label="Result"; Expression={
             if ($_.Result -eq "Pass") {
                 $color = '36'

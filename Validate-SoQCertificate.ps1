@@ -1007,7 +1007,7 @@ $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.Failu
             {
                 $script:log.NewLog("SoQCertPurpose", "ValidatePurpose", "IsValid: False")
                 $this.Result.SetFailureReason( "Purpose does not contain Server Authentication. Purpose: $($this.Purpose -join ', ')" )
-                $script:log.NewLog("SoQCertPurpose", "ValidatePurpose", "Failure Reason: $($this.FailureReason)")
+                $script:log.NewLog("SoQCertPurpose", "ValidatePurpose", "Failure Reason: $($this.Result.FailureReason)")
                 $script:log.NewLog("SoQCertPurpose", "ValidatePurpose", "Purpose: $($this.Purpose), Must contain: Server Authentication")
             }
 
@@ -1968,7 +1968,7 @@ TlsString: $($this.TlsString); STRONG_CRYPTO: $($this.StrongCrypto); TLS1.3Suite
                 } else {
                     $script:log.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Validation failed.")
                     $this.Result.SetValidity( "Fail" )
-                    $this.FailureReason = "The 'SSL Cipher Suite Order' policy has been modified and does not include a TLS 1.3 compatible cipher suite. See: https://learn.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-server-2022"
+                    $this.Result.FailureReason = "The 'SSL Cipher Suite Order' policy has been modified and does not include a TLS 1.3 compatible cipher suite. See: https://learn.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-server-2022"
                 }
 
             } else {

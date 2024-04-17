@@ -2221,7 +2221,11 @@ $($this.CertChain.ToShortString())
 
     # Validate LogPath - Failures cause $PWD to be used.
     # make sure the log path is a valid path
-    if ( -NOT (Test-Path "$LogPath" -IsValid)) { $LogPath = $PWD.Path }
+    if ( [string]::IsNullOrEmpty($LogPath) ) {
+        $LogPath = $PWD.Path
+    } elseif ( -NOT (Test-Path "$LogPath" -IsValid -EA SilentlyContinue)) { 
+        $LogPath = $PWD.Path 
+    }
 
     # LogPath must be a directory
     $lpIsDir = Get-Item "$LogPath" -EA SilentlyContinue
@@ -2243,7 +2247,8 @@ $($this.CertChain.ToShortString())
 
     $script:psVerMaj = $Host.Version.Major
     if ( $script:psVerMaj -eq 5 ) {
-        $script:log.NewWarning("Please use PowerShell 7 for the best experience. The .NET certificate namespaces used by Windows PowerShell 5.1 cannot full parse certificate details.`n`nhttps://aka.ms/powershell")
+        #$script:log.NewWarning("Please use PowerShell 7 for the best experience. The .NET certificate namespaces used by Windows PowerShell 5.1 cannot full parse certificate details.`n`nhttps://aka.ms/powershell")
+        Write-Warning "Please use PowerShell 7 for the best experience. The .NET certificate namespaces used by Windows PowerShell 5.1 cannot full parse certificate details.`n`nhttps://aka.ms/powershell"
     }
 
     $script:log.NewLog("PowerShell version: $($Host.Version)")
@@ -2318,7 +2323,8 @@ process {
     }
     
     if ( $tmpCerts.Count -eq 0 ) {
-        $script:log.NewError("NO_CERTS_FOUND", "No certificates were found in LocalMachine\My (Local Computer > Personal > Certificates)", $true)
+        $script:log.NewLog("No certificates were found in LocalMachine\My (Local Computer > Personal > Certificates)")
+        return #null
     }
 
     # loop through all discovered certs

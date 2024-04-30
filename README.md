@@ -1,12 +1,15 @@
 # Validate-SoQCertificate
 Runs basic checks on a certificate, or the entire LocalMachine\My store, to verify whether a certificate is SMB over QUIC (TLS 1.3) compatible.
 
-This script works best with PowerShell 7+. PowerShell 7 is the preferred method because .NET 7 has better certificate methods, which guarantees better accuracy. Legacy Windows PowerShell 5.1 will work with limited functionality.
+These scripts now require PowerShell 7.4+. PowerShell 7 is the preferred method because .NET 7 has better certificate support, which guarantees better accuracy. Legacy Windows PowerShell 5.1 will only work with the legacy validation cmdlet.
 
 :warning: **Warning** :warning:
 
-Some functionality will not work on legacy Windows PowerShell 5.1; such as, ECDSA public key algorithm detection and Quiet mode. 
+Some functionality will not work with the legacy script and Windows PowerShell 5.1; such as, ECDSA public key algorithm detection and Quiet mode. Please use PowerShell 7.4+ when executing these scripts.
 
+
+
+## Legacy command options
 
 ```powershell
 # download the script
@@ -14,24 +17,24 @@ iwr https://raw.githubusercontent.com/JamesKehr/Validate-SoQCertificate/main/Val
 
 ### Standard output mode ###
 # test all scripts in LocalMachine\My
-.\Validate-SoQCertificate.ps1
+.\Validate-SmbOverQuicCertificateLegacy.ps1
 
 # test a single certificate
-.\Validate-SoQCertificate.ps1 -Thumbprint <thumbprint>
+.\Validate-SmbOverQuicCertificateLegacy.ps1 -Thumbprint <thumbprint>
 
 
 ### Detailed output mode ###
 # test all scripts in LocalMachine\My with detailed results
-.\Validate-SoQCertificate.ps1 -Detailed
+.\Validate-SmbOverQuicCertificateLegacy.ps1 -Detailed
 
 # test a single certificate with detailed results
-.\Validate-SoQCertificate.ps1 -Thumbprint <thumbprint> -Detailed
+.\Validate-SmbOverQuicCertificateLegacy.ps1 -Thumbprint <thumbprint> -Detailed
 
 
 ### IgnoreOS ###
 # test a certificate on a non-Azure Edition system for validation purposes
 # with detailed output.
-.\Validate-SoQCertificate.ps1 -Thumbprint <thumbprint> -Detailed -IgnoreOS
+.\Validate-SmbOverQuicCertificateLegacy.ps1 -Thumbprint <thumbprint> -Detailed -IgnoreOS
 
 
 ### Quiet mode ###
@@ -44,35 +47,35 @@ iwr https://raw.githubusercontent.com/JamesKehr/Validate-SoQCertificate/main/Val
 # Ignores:
 #    - Detailed
 #    - PassThru
-.\Validate-SoQCertificate.ps1 -Thumbprint <thumbprint> -Quiet
+.\Validate-SmbOverQuicCertificateLegacy.ps1 -Thumbprint <thumbprint> -Quiet
 
 
 ### Passthru mode ###
 # returns the [SoQCertValidation] object(s)
 # Detailed is ignored.
-$isCertSoQValid = .\Validate-SoQCertificate.ps1 -Thumbprint <thumbprint> -Passthru
+$isCertSoQValid = .\Validate-SmbOverQuicCertificateLegacy.ps1 -Thumbprint <thumbprint> -Passthru
 
 ### Troubleshooting ###
 # run with verbose output, shows where certificates fail a test.
-.\Validate-SoQCertificate.ps1 -Verbose
+.\Validate-SmbOverQuicCertificateLegacy.ps1 -Verbose
 
 # debug level output
 # WARNING: This can output a large amount of data to the console
 if ($Host.Version.Major -ge 7) {
-  .\Validate-SoQCertificate.ps1 -Verbose -Debug
+  .\Validate-SmbOverQuicCertificateLegacy.ps1 -Verbose -Debug
 } else {
   # -Debug doesn't work right in Windows PowerShell 5.1, so change the DebugPreference instead
   $currDP = $DebugPreference
   $DebugPreference = "Continue"
   
-  .\Validate-SoQCertificate.ps1 -Verbose
+  .\Validate-SmbOverQuicCertificateLegacy.ps1 -Verbose
   
   $DebugPreference = $currDP
 }
   
 
 # output verbose and debug logging, and results to a file on the desktop
-.\Validate-SoQCertificate.ps1 -Verbose *> "$([Environment]::GetFolderPath("Desktop"))\soqCerts.txt"
+.\Validate-SmbOverQuicCertificateLegacy.ps1 -Verbose *> "$([Environment]::GetFolderPath("Desktop"))\soqCerts.txt"
 ```
 
 ## NOTE

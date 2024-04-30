@@ -1,4 +1,4 @@
-These scripts now require PowerShell 7.4+. PowerShell 7 is the preferred method because .NET 7 has better certificate support, which guarantees better accuracy. Legacy Windows PowerShell 5.1 will only work with the legacy validation cmdlet. Think of this as a command line version of Windows Admin Center.
+These scripts now require PowerShell 7.4+. PowerShell 7 is the preferred method because .NET 7 has better certificate support, which guarantees better accuracy. Legacy Windows PowerShell 5.1 will only work with the legacy validation cmdlet.
 
 # Initialize-SmbOverQuicServer
 

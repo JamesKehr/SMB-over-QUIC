@@ -1,10 +1,14 @@
 # validate SMB over QUIC certificate
 #requires -RunAsAdministrator
-#requires -Version 5.1
+#requires -Version 7.4
 
 using namespace System.Collections
 using namespace System.Collections.Generic
 using namespace System.Collections.Concurrent
+#using module .\class\libValCert.psm1
+#using module .\class\libLogging.psm1
+
+
 
 <#
 
@@ -77,6 +81,12 @@ param (
     [switch]
     $IgnoreOS,
 
+    # The SMB over QUIC EKU type that needs to be validated. The options are: Server (default) or Client
+    [Parameter()]
+    [ValidateSet("Server", "Client")]
+    [string]
+    $EKUType = "Server",
+
     # Returns a true or false for a single certificate. Requires PowerShell 7!
     [Parameter()]
     [switch]
@@ -101,79 +111,41 @@ begin {
     try {
         . "$PSScriptRoot\class\libLogging.ps1"
         . "$PSScriptRoot\class\libValCert.ps1"
+        #Import-Module "$PSScriptRoot\class\libLogging.psm1"
+        #Import-Module "$PSScriptRoot\class\libValCert.psm1"
     } catch {
         return ( Write-Error "Failed to import a required class library: $_" -EA Stop )
-    }
+    }#>
 
 
     # start logging
-    # do not write the log unless LogPath has a valid path
-    $moduleName = "Validate-SmbOverQuicCertificate"
-    if ( [string]::IsNullOrEmpty($LogPath) ) {
-        Write-Verbose "No log write mode."
+    $oldLogMod = Start-Logging -ModuleName ((Get-PSCallStack)[0].Command.Split('.')[0]) -LogPath $LogPath
 
-        # change the module if the log var exists
-        if ($script:log) {
-            $oldLogMod = $script:log.Module
-            Write-Verbose "oldLogMod: $oldLogMod"
-            $script:log.Module = $moduleName
-        # otherwise create a new log
-        } else {
-            $oldLogMod = $null
-            # create new log with NoWrite set to $true
-            $script:log = [Logging]::new($false, $moduleName)
-        }
-    } else {
-        Write-Verbose "Write logs to path: $LogPath"
-    
-        # LogPath must be a directory
-        $lpIsDir = Get-Item "$LogPath" -EA SilentlyContinue
-        if ( $lpIsDir -and -NOT $lpIsDir.PSIsContainer ) { $LogPath = $PWD.Path }
-
-        # create the dir if needed
-        try {
-            $null = New-Item "$LogPath" -ItemType Directory -Force -EA Stop
-        } catch {
-            # use PWD instead
-            $LogPath = $PWD.Path
-        }
-
-        if ($logFnd) {
-            $oldLogMod = $script:log.Module
-            $script:log.Module = $moduleName
-        # otherwise create a new log
-        } else {
-            $oldLogMod = ""
-            # create new log with NoWrite set to $true
-            $script:log = [Logging]::new($LogPath, $moduleName)
-        } 
-    }
-    
-
-    $script:log.NewLog("Begin")
-    $script:log.NewLog("Current user: $env:UserName")
+    Write-Log "Begin"
+    Write-Log "Current user: $env:UserName"
+    Write-Log "EKUType: $EKUType"
 
 
     $script:psVerMaj = $Host.Version.Major
     if ( $script:psVerMaj -eq 5 ) {
-        #$script:log.NewWarning("Please use PowerShell 7 for the best experience. The .NET certificate namespaces used by Windows PowerShell 5.1 cannot full parse certificate details.`n`nhttps://aka.ms/powershell")
+        #Write-LogWarning "Please use PowerShell 7 for the best experience. The .NET certificate namespaces used by Windows PowerShell 5.1 cannot full parse certificate details.`n`nhttps://aka.ms/powershell")
         Write-Warning "Please use PowerShell 7 for the best experience. The .NET certificate namespaces used by Windows PowerShell 5.1 cannot full parse certificate details.`n`nhttps://aka.ms/powershell"
     }
 
-    $script:log.NewLog("PowerShell version: $($Host.Version)")
-    $script:log.NewLog("OS version: $([System.Environment]::OSVersion.Version.ToString())")
+    Write-Log "PowerShell version: $($Host.Version)"
+    Write-Log "OS version: $([System.Environment]::OSVersion.Version.ToString())"
 }
 
 process {
     #### MAIN ####
 
     <#
-        $script:log.NewLog("")
-        $script:log.NewError("code", "", $false)
-        $script:log.NewWarning("code", "")
+        Write-Log ""
+        Write-LogError -Code "" -Text "" [-NonTerminating]
+        Write-LogWarning -Code "" -Text ""
     #>
 
-    $script:log.NewLog("Process")
+    Write-Log "Process"
     <# 
     Run in a special mode if -Quiet is set.
 
@@ -182,13 +154,13 @@ process {
 
     #>
     if ($Quiet.IsPresent) {
-        $script:log.NewLog("Quiet mode.")
+        Write-Log "Quiet mode."
         if ($Host.Version.Major -lt 7) {
-            $script:log.NewError("INVALID_PWSH_VERSION", "Quiet mode only works on PowerShell 7.", $true)
+            Write-LogError -Code "INVALID_PWSH_VERSION" -Text "Quiet mode only works on PowerShell 7."
         }
 
         if ( [string]::IsNullOrEmpty($Thumbprint) ) {
-            $script:log.NewError("MISSING_THUMBPRINT", "Quiet mode requires a Thumbprint.", $true)
+            Write-LogError -Code "MISSING_THUMBPRINT" -Text "Quiet mode requires a Thumbprint."
         }
 
         # perform work
@@ -196,11 +168,12 @@ process {
         try {
             $cert = Get-Item "Cert:\LocalMachine\My\$Thumbprint" -EA Stop
         } catch {
-            $script:log.NewError("CERT_NOT_FOUND", "Failed to find a certificate in LocalMachine\My with the Thumbprint $Thumbprint.", $true)
+            Write-LogError -Code "CERT_NOT_FOUND" -Text "Failed to find a certificate in LocalMachine\My with the Thumbprint $Thumbprint."
         }
 
         # run the tests
-        $tmpCert = [SoQCertValidation]::new($cert, $IgnoreOS.IsPresent)
+        Write-Log "[SoQCertValidation]::new($cert, $IgnoreOS.IsPresent, $EKUType)"
+        $tmpCert = [SoQCertValidation]::new($cert, $IgnoreOS.IsPresent, $EKUType)
 
         if ($tmpCert.IsValid -eq "Pass") {
             return $true
@@ -212,27 +185,27 @@ process {
 
 
     # stores the certificate(s) being tested
-    $script:log.NewLog("Create [SoQCertValidation] object.")
+    Write-Log "Create [SoQCertValidation] object."
     $certs = [List[SoQCertValidation]]::new()
 
     # get all the certs in LocalMachine\My, where the SMB over QUIC certs live
     $tmpCerts = @()
     try {
-        $script:log.NewLog("Retrieving certificates.")
+        Write-Log "Retrieving certificates."
         if ( [string]::IsNullOrEmpty($Thumbprint) ) {
             $tmpCerts = Get-ChildItem Cert:\LocalMachine\My -EA Stop
-            $script:log.NewLog("Discovered $() certificates.")
+            Write-Log "Discovered $() certificates."
         } else {
             # get the cert object based on the Thumbprint
             $tmpCerts = Get-Item "Cert:\LocalMachine\My\$Thumbprint" -EA Stop
-            $script:log.NewLog("Found the certificate with thumbprint $Thumbprint.")
+            Write-Log "Found the certificate with thumbprint $Thumbprint."
         }
     } catch {
-        $script:log.NewError("CERT_FAILURE", "Failed to retrieve certificate(s) from LocalMachine\My (Local Computer > Personal > Certificates): $_", $true)
+        Write-LogError -Code "CERT_FAILURE" -Text "Failed to retrieve certificate(s) from LocalMachine\My (Local Computer > Personal > Certificates): $_"
     }
     
     if ( $tmpCerts.Count -eq 0 ) {
-        $script:log.NewLog("No certificates were found in LocalMachine\My (Local Computer > Personal > Certificates)")
+        Write-Log "No certificates were found in LocalMachine\My (Local Computer > Personal > Certificates)"
         return #null
     }
 
@@ -240,15 +213,16 @@ process {
     # the SoQCertValidation class, and its sublasses, automatically does all the validation work 
     foreach ( $cert in $tmpCerts)
     {
-        $script:log.NewLog("IgnoreOS: $IgnoreOS")
+        Write-Log "IgnoreOS: $IgnoreOS"
         try {
-            $script:log.NewLog("Processing: $($cert.Thumbprint) ($(($cert.Subject)))")
-            $tmpCert = [SoQCertValidation]::new($cert, $IgnoreOS.IsPresent)
-            $script:log.NewLog("Result: $($tmpCert.ToShortString())")
+            Write-Log "Processing: $($cert.Thumbprint) ($(($cert.Subject)))"
+            Write-Log "[SoQCertValidation]::new($($cert.Thumbprint), $($IgnoreOS.IsPresent), $EKUType)"
+            $tmpCert = [SoQCertValidation]::new($cert, $IgnoreOS.IsPresent, $EKUType)
+            Write-Log "Result: $($tmpCert.ToShortString())"
             $certs.Add($tmpCert)
             Remove-Variable tmpCert
         } catch {
-            $script:log.NewWarning("PROCESS_CERT_FAILURE", "Failed to convert the certificate ($($cert.Thumbprint)) to a [SoQCertValidation] object: $_")
+            Write-LogWarning -Code "PROCESS_CERT_FAILURE" -Text "Failed to convert the certificate ($($cert.Thumbprint)) to a [SoQCertValidation] object: $_"
         }
     }
 
@@ -258,7 +232,7 @@ process {
 
     # the only thing left to do is output the results
     if ( $Detailed.IsPresent ) {
-        $script:log.NewLog("Detailed output.")
+        Write-Log "Detailed output."
         foreach ($cert in $certs)
         {
             $tests = $cert.GetSubclassVariables()
@@ -322,25 +296,12 @@ process {
 }
 
 clean {
-    $script:log.NewLog("Enter clean")
+    Write-Log "Clean up, clean up, everybody do your part!"
 
     # swap module name back when returning to a caller
-    if ( -NOT [string]::IsNullOrEmpty($oldLogMod) ) {
-        $script:log.NewLog("Change log module back to $oldLogMod")
-        $script:log.Module = $oldLogMod
-    # close log when this is the parent
-    } else {
-        $script:log.NewLog("Closing log.")
-        $script:log.Close()
-    }
-
-    $script:log.NewLog("Exit clean")
-
+    Close-Logging -ModuleName ((Get-PSCallStack)[0].Command.Split('.')[0]) -oldLogMod $oldLogMod
 }
 
 end {
-    $script:log.NewLog("End")
-
-    # close logging - this should go in clean{} for PowerShell 7.3+ because it runs even when the script is terminated... but need that backward compat.
-    $log.close()
+    Write-Log "End"
 }

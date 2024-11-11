@@ -5,6 +5,8 @@
 using namespace System.Collections
 using namespace System.Collections.Generic
 using namespace System.Collections.Concurrent
+#using module .\libLogging.psm1
+
 
 <#
     Pass = the test was successful
@@ -17,6 +19,28 @@ enum SoQState {
     Warning
 }
 
+<#
+    SMB over QUIC client access control requires client auth EKU certificates.
+#>
+enum SoQEKUType {
+    Server
+    Client
+}
+
+<#
+    Used for EKU ID validation.
+    Currently not required...
+#
+[hashtable]$EKUMap = @{
+    Server = '1.3.6.1.5.5.7.3.1'
+    Client = '1.3.6.1.5.5.7.3.2'
+}#>
+
+
+<#
+    These are the validation classes.
+#>
+
 class SoQResult {
     [SoQState]
     $IsValid
@@ -28,15 +52,15 @@ class SoQResult {
     $Passed
 
     SoQResult() {
-        $script:log.NewLog("SoQResult", "New SoQResult.")
+        $script:libLogging.NewLog($null, "SoQResult", "New SoQResult.")
         $this.IsValid       = "Warning"
         $this.FailureReason = [List[string]]::new()
         $this.Passed        = $false
-        $script:log.NewLog("SoQResult", "Created SoQResult.")
+        $script:libLogging.NewLog($null, "SoQResult", "Created SoQResult.")
     }
 
     SetValidity([SoQState]$Result) {
-        $script:log.NewLog("SoQResult", "SetValidity", "$Result")
+        $script:libLogging.NewLog("SoQResult", "SetValidity", "$Result")
         $this.IsValid = $Result
         $this.UpdatePassFail()
     }
@@ -49,7 +73,7 @@ class SoQResult {
     }
 
     AddToFailureReason([string]$FR) {
-        $script:log.NewLog("SoQResult", "AddToFailureReason", "$FR")
+        $script:libLogging.NewLog("SoQResult", "AddToFailureReason", "$FR")
         $this.FailureReason.Add($FR)
         $this.UpdatePassFail()
     }
@@ -82,6 +106,9 @@ class SoQSupportedOS {
     [SoQResult]
     $Result = [SoQResult]::new()
 
+    [SoQEKUType]
+    $RequiredEKU
+
     hidden
     [int]
     $MinOsVersion
@@ -91,66 +118,108 @@ class SoQSupportedOS {
     $OsBuild
 
     SoQSupportedOS() {
-        $script:log.NewLog("SoQSupportedOS", "Begin")
+        $script:libLogging.NewLog($null, "SoQSupportedOS", "Begin [default]")
+
+        # default to server authentication EKU
+        $this.RequiredEKU = "Server"
+        $script:libLogging.NewLog($null, "SoQSupportedOS", "EKU type: $($this.RequiredEKU) Authentication")
 
         $this.Result.SetValidity( "Pass" )
         $this.ValidateServerOS()
-        $script:log.NewLog("SoQSupportedOS", "End")
+        $script:libLogging.NewLog($null, "SoQSupportedOS", "End [default]")
+    }
+
+    SoQSupportedOS([SoQEKUType]$eku) {
+        $script:libLogging.NewLog($null, "SoQSupportedOS", "Begin [eku]")
+
+        try {
+            $this.RequiredEKU = $eku
+            $script:libLogging.NewLog($null, "SoQSupportedOS", "EKU type: $($this.RequiredEKU) Authentication")
+        } catch {
+            $script:libLogging.NewError("SoQSupportedOS", "UNKNOWN_EKU_TYPE", "The EKU type, $eku, is unsupported. The supported types are: $([enum]::GetNames([SoQEKUType]) -join ', ')", $true)
+        }
+        
+
+        $this.Result.SetValidity( "Pass" )
+        $this.ValidateServerOS()
+        $script:libLogging.NewLog($null, "SoQSupportedOS", "End [eku]")
     }
 
     ValidateServerOS() {
-        $script:log.NewLog("SoQSupportedOS", "ValidateServerOS", "Begin")
+        $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "Begin")
 
         # get OS version
         $osVer = [System.Environment]::OSVersion | ForEach-Object { $_.Version }
         $this.OsBuild = $osVer.Build 
-        $script:log.NewLog("SoQSupportedOS", "ValidateServerOS", "osVer: $($osVer.ToString())")
+        $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "osVer: $($osVer.ToString())")
 
         # use WMI to get OS details, since this is designed to run on Windows
         $wmiOS = Get-WmiObject Win32_OperatingSystem -Property Caption,ProductType
         $osName =  $wmiOS.Caption
 
-        if ($osName -match "Azure Edition") {
-            $this.MinOsVersion = 20348
-        } else {
-            $this.MinOsVersion = 26080
+        switch ($this.RequiredEKU) {
+            "Server" {
+                $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "Supported SMB server detection.")
+                if ($osName -match "Azure Edition") {
+                    $this.MinOsVersion = 20348
+                } else {
+                    # RTM version of Windows Server 2025
+                    $this.MinOsVersion = 26100
+                }
+
+                $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "Caption: $osName")
+
+                # ProductType: 1 = workstation, 2 = DC, 3 = Server
+                $osType = $wmiOS.ProductType
+                $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "osType: $osType")
+
+                $this.Result.ClearFailureReason()
+                $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "Start - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)")
+
+                # must be server or DC product type
+                if ( $osType -ne 2 -and $osType -ne 3 ) {
+                    $this.Result.SetValidity( "Fail" )
+                    $this.Result.AddToFailureReason( "Not Windows Server." )
+                }
+                $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "ProductType - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)")
+
+                # must be Server 2022 or higher
+                if ($osVer.Major -lt 10 -or $osVer.Build -lt 20348) {
+                    $this.Result.SetValidity( "Fail" )
+                    $this.Result.AddToFailureReason( "Not Windows Server 2022 or greater." )
+                } 
+                $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "Version - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)")
+                
+                # the edition must be Azure Edition or above MinOsVersion (Windows Server 2025)
+                if ($osName -notmatch "Azure Edition" -and $osVer.Build -lt $this.MinOsVersion) {
+                    $this.Result.SetValidity( "Fail" )
+                    $this.Result.AddToFailureReason( "Not Azure Edition and not Windows Server 2025 or newer." )
+                }
+                $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "Azure Edition - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)")
+            }
+
+            "Client" {
+                $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "Supported SMB client detection.")
+                # Set the min OS version to Windows Server 2022, the first OS version with SMB over QUIC client support.
+                $this.MinOsVersion = 20348
+
+                $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "Caption: $osName")
+
+                # The only SoQ client check needed is version number.
+                # the edition must be above MinOsVersion (Windows Server 2022)
+                if ($osVer.Build -lt $this.MinOsVersion) {
+                    $this.Result.SetValidity( "Fail" )
+                    $this.Result.AddToFailureReason( "SMB over QUIC client is unsupported. Min. Build: $($this.MinOsVersion); Current Build: $($osVer.Build)" )
+                }
+                $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "OS version - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)")
+            }
         }
-
-        $script:log.NewLog("SoQSupportedOS", "ValidateServerOS", "Caption: $osName")
-
-        # ProductType: 1 = workstation, 2 = DC, 3 = Server
-        $osType = $wmiOS.ProductType
-        $script:log.NewLog("SoQSupportedOS", "ValidateServerOS", "osType: $osType")
-
-        $this.Result.ClearFailureReason()
-        $script:log.NewLog("SoQSupportedOS", "ValidateServerOS", "Start - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)")
-
-        # must be server or DC product type
-        if ( $osType -ne 2 -and $osType -ne 3 ) {
-            $this.Result.SetValidity( "Fail" )
-            $this.Result.AddToFailureReason( "Not Windows Server." )
-        }
-        $script:log.NewLog("SoQSupportedOS", "ValidateServerOS", "ProductType - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)")
-
-        # must be Server 2022 or higher
-        if ($osVer.Major -lt 10 -or $osVer.Build -lt 20348) {
-            $this.Result.SetValidity( "Fail" )
-            $this.Result.AddToFailureReason( "Not Windows Server 2022 or greater." )
-        } 
-        $script:log.NewLog("SoQSupportedOS", "ValidateServerOS", "Version - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)")
-        
-        # the edition must be Azure Edition or above MinOsVersion (Windows Server 2025)
-        if ($osName -notmatch "Azure Edition" -and $osVer.Build -lt $this.MinOsVersion) {
-            $this.Result.SetValidity( "Fail" )
-            $this.Result.AddToFailureReason( "Not Azure Edition and not Windows Server 2025 or newer." )
-        }
-        $script:log.NewLog("SoQSupportedOS", "ValidateServerOS", "Azure Edition - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)")
 
         # clear failure reason if IsValid passed
         if ( $this.Result.IsValid -eq "Pass" ) {
             $this.Result.ClearFailureReason()
         }
-        $script:log.NewLog("SoQSupportedOS", "ValidateServerOS", "End - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)")
+        $script:libLogging.NewLog("SoQSupportedOS", "ValidateServerOS", "End - IsValid: $($this.Result.IsValid); FailureReason: $($this.Result.FailureReason)")
     }
 
     [string]
@@ -207,36 +276,36 @@ class SoQCertExpired {
         $Certificate
     )
     {
-        $script:log.NewLog("SoQCertExpired", "Begin")
+        $script:libLogging.NewLog($null, "SoQCertExpired", "Begin")
         $this.NotBefore      = $Certificate.NotBefore
         $this.NotAfter       = $Certificate.NotAfter
         $this.TestDate       = [DateTime]::Now
-        $script:log.NewLog("SoQCertExpired", "Validate")
+        $script:libLogging.NewLog($null, "SoQCertExpired", "Validate")
         $this.Result.SetValidity( $this.ValidateDate() )
-        $script:log.NewLog("SoQCertExpired", "End")
+        $script:libLogging.NewLog($null, "SoQCertExpired", "End")
     }
 
     [SoQState]
     ValidateDate() {
-        $script:log.NewLog("SoQCertExpired", "ValidateDate", "Start")
+        $script:libLogging.NewLog("SoQCertExpired", "ValidateDate", "Start")
         [SoQState]$isValidtmp = "Fail"
         
         $date = $this.TestDate
         if ( $this.NotBefore -lt $date -and $this.NotAfter -gt $date )
         {
-            $script:log.NewLog("SoQCertExpired", "ValidateDate", "IsValid: True")
+            $script:libLogging.NewLog("SoQCertExpired", "ValidateDate", "IsValid: True")
             $isValidtmp = "Pass"
         }
         else
         {
-            $script:log.NewLog("SoQCertExpired", "ValidateDate", "IsValid: False")
+            $script:libLogging.NewLog("SoQCertExpired", "ValidateDate", "IsValid: False")
             $FR = "Certificate is expired. Expired: $($this.NotAfter.ToShortDateString()) $($this.NotAfter.ToShortTimeString()), Today's Date: $($this.TestDate.ToShortDateString()) $($this.TestDate.ToShortTimeString())"
             $this.Result.SetFailureReason( $FR )
-            $script:log.NewLog("SoQCertExpired", "ValidateDate", "Failure Reason: $($this.Result.FailureReason)")
-            $script:log.NewLog("SoQCertExpired", "ValidateDate", "NotBefore: $($this.NotBefore.ToString()), NotAfter: $($this.NotAfter.ToString()), Test Date: $($date.ToString())")
+            $script:libLogging.NewLog("SoQCertExpired", "ValidateDate", "Failure Reason: $($this.Result.FailureReason)")
+            $script:libLogging.NewLog("SoQCertExpired", "ValidateDate", "NotBefore: $($this.NotBefore.ToString()), NotAfter: $($this.NotAfter.ToString()), Test Date: $($date.ToString())")
         }
 
-        $script:log.NewLog("SoQCertExpired", "ValidateDate", "End")
+        $script:libLogging.NewLog("SoQCertExpired", "ValidateDate", "End")
         return $isValidtmp
     }
 
@@ -283,41 +352,69 @@ class SoQCertPurpose {
     [string[]]
     $Purpose
 
+    [SoQEKUType]
+    $RequiredEKU
+
     [SoQResult]
     $Result = [SoQResult]::new()
 
     SoQCertPurpose(
         [System.Security.Cryptography.X509Certificates.X509Certificate]
         $Certificate
-    )
-    {
-        $script:log.NewLog("SoQCertPurpose", "Begin")
+    ) {
+        $script:libLogging.NewLog($null, "SoQCertPurpose", "Begin [default]")
+        
+        # default to server
+        $this.RequiredEKU = "Server"
+        $script:libLogging.NewLog($null, "SoQCertPurpose", "EKU type: $($this.RequiredEKU) Authentication")
+
         $this.Purpose = $Certificate.EnhancedKeyUsageList.FriendlyName
-        $script:log.NewLog("SoQCertPurpose", "Validate")
+        $script:libLogging.NewLog($null, "SoQCertPurpose", "Validate")
         $this.Result.SetValidity( $this.ValidatePurpose() )
-        $script:log.NewLog("SoQCertPurpose", "End")
+        $script:libLogging.NewLog($null, "SoQCertPurpose", "End [default]")
+    }
+
+    # add client support
+    SoQCertPurpose(
+        [System.Security.Cryptography.X509Certificates.X509Certificate]
+        $Certificate,
+        [SoQEKUType]
+        $eku
+    ) {
+        $script:libLogging.NewLog($null, "SoQCertPurpose", "Begin [eku]")
+
+        # default to server
+        $this.RequiredEKU = $eku
+        $script:libLogging.NewLog($null, "SoQCertPurpose", "EKU type: $($this.RequiredEKU) Authentication")
+        
+        $this.Purpose = $Certificate.EnhancedKeyUsageList.FriendlyName
+        $script:libLogging.NewLog($null, "SoQCertPurpose", "Validate")
+        $this.Result.SetValidity( $this.ValidatePurpose() )
+        $script:libLogging.NewLog($null, "SoQCertPurpose", "End [eku]")
     }
 
     [SoQState]
     ValidatePurpose()
     {
-        $script:log.NewLog("SoQCertPurpose", "ValidatePurpose", "Start")
+        $script:libLogging.NewLog("SoQCertPurpose", "ValidatePurpose", "Start")
         [SoQState]$isValidtmp = "Fail"
 
-        if ( $this.Purpose -contains "Server Authentication")
+        # supports Server or Client Authentication
+        $script:libLogging.NewLog("SoQCertPurpose", "ValidatePurpose", "Required purpose: $($this.RequiredEKU) Authentication")
+        if ( $this.Purpose -contains "$($this.RequiredEKU) Authentication")
         {
-            $script:log.NewLog("SoQCertPurpose", "ValidatePurpose", "IsValid: True")
+            $script:libLogging.NewLog("SoQCertPurpose", "ValidatePurpose", "IsValid: True")
             $isValidtmp = "Pass"
         }
         else 
         {
-            $script:log.NewLog("SoQCertPurpose", "ValidatePurpose", "IsValid: False")
+            $script:libLogging.NewLog("SoQCertPurpose", "ValidatePurpose", "IsValid: False")
             $this.Result.SetFailureReason( "Purpose does not contain Server Authentication. $( if ($this.Purpose.Count -gt 0) {"Purpose: $($this.Purpose -join ', ')"})" )
-            $script:log.NewLog("SoQCertPurpose", "ValidatePurpose", "Failure Reason: $($this.Result.FailureReason)")
-            $script:log.NewLog("SoQCertPurpose", "ValidatePurpose", "Purpose: $($this.Purpose), Must contain: Server Authentication")
+            $script:libLogging.NewLog("SoQCertPurpose", "ValidatePurpose", "Failure Reason: $($this.Result.FailureReason)")
+            $script:libLogging.NewLog("SoQCertPurpose", "ValidatePurpose", "Purpose: $($this.Purpose), Must contain: Server Authentication")
         }
 
-        $script:log.NewLog("SoQCertPurpose", "ValidatePurpose", "End")
+        $script:libLogging.NewLog("SoQCertPurpose", "ValidatePurpose", "End")
         return $isValidtmp
     }
 
@@ -372,7 +469,7 @@ class SoQCertKeyUsage {
         $Certificate
     )
     {
-        $script:log.NewLog("SoQCertKeyUsage","Start")
+        $script:libLogging.NewLog($null, "SoQCertKeyUsage","Start")
         $tmpKey = $Certificate.Extensions | Where-Object { $_.Oid.FriendlyName -eq "Key Usage" }
         if ( $tmpKey )
         {
@@ -380,34 +477,34 @@ class SoQCertKeyUsage {
         }
         else 
         {
-            $script:log.NewLog("SoQCertKeyUsage","KeyUsage was not found.")
+            $script:libLogging.NewLog($null, "SoQCertKeyUsage","KeyUsage was not found.")
             $this.KeyUsage = $null
         }
         
-        $script:log.NewLog("SoQCertKeyUsage","Validate")
+        $script:libLogging.NewLog($null, "SoQCertKeyUsage","Validate")
         $this.Result.SetValidity( $this.ValidateKeyUsage() )
-        $script:log.NewLog("SoQCertKeyUsage","End")
+        $script:libLogging.NewLog($null, "SoQCertKeyUsage","End")
     }
 
     [SoqState]
     ValidateKeyUsage() {
-        $script:log.NewLog("SoQCertKeyUsage", "ValidateKeyUsage", "Start")
+        $script:libLogging.NewLog("SoQCertKeyUsage", "ValidateKeyUsage", "Start")
         [SoqState]$isValidtmp = "Fail"
 
         if ( $this.KeyUsage -match "Digital Signature" )
         {
-            $script:log.NewLog("SoQCertKeyUsage", "ValidateKeyUsage", "IsValid: True")
+            $script:libLogging.NewLog("SoQCertKeyUsage", "ValidateKeyUsage", "IsValid: True")
             $isValidtmp = "Pass"
         }
         else 
         {
-            $script:log.NewLog("SoQCertKeyUsage", "ValidateKeyUsage", "IsValid: False")
+            $script:libLogging.NewLog("SoQCertKeyUsage", "ValidateKeyUsage", "IsValid: False")
             $this.Result.SetFailureReason( "Key Usage does not match 'Digital Signature'. $(if (-NOT [string]::IsNullOrEmpty($this.KeyUsage)) {"($($this.KeyUsage))"})" )
-            $script:log.NewLog("SoQCertKeyUsage", "ValidateKeyUsage", "Failure Reason: $($this.Result.FailureReason)")
-            $script:log.NewLog("SoQCertKeyUsage", "ValidateKeyUsage", "KeyUsage: $($this.KeyUsage), Requires: Digital Signature")
+            $script:libLogging.NewLog("SoQCertKeyUsage", "ValidateKeyUsage", "Failure Reason: $($this.Result.FailureReason)")
+            $script:libLogging.NewLog("SoQCertKeyUsage", "ValidateKeyUsage", "KeyUsage: $($this.KeyUsage), Requires: Digital Signature")
         }
 
-        $script:log.NewLog("SoQCertKeyUsage", "ValidateKeyUsage", "End")
+        $script:libLogging.NewLog("SoQCertKeyUsage", "ValidateKeyUsage", "End")
         return $isValidtmp
     }
 
@@ -464,33 +561,33 @@ class SoQCertSubject {
         $Certificate
     )
     {
-        $script:log.NewLog("SoQCertSubject","Start")
+        $script:libLogging.NewLog($null, "SoQCertSubject","Start")
         $this.Subject = $Certificate.Subject
-        $script:log.NewLog("SoQCertSubject","Validate")
+        $script:libLogging.NewLog($null, "SoQCertSubject","Validate")
         $this.Result.SetValidity( $this.ValidateSubject() )
-        $script:log.NewLog("SoQCertSubject","End")
+        $script:libLogging.NewLog($null, "SoQCertSubject","End")
     }
 
     [SoQState]
     ValidateSubject()
     {
-        $script:log.NewLog("SoQCertSubject", "ValidateSubject", "Start")
+        $script:libLogging.NewLog("SoQCertSubject", "ValidateSubject", "Start")
         [SoQState]$isValidtmp = "Fail"
 
         if ( $this.Subject -match $this.rgxSubject )
         {
-            $script:log.NewLog("SoQCertSubject", "ValidateSubject", "IsValid: True")
+            $script:libLogging.NewLog("SoQCertSubject", "ValidateSubject", "IsValid: True")
             $isValidtmp = "Pass"
         }
         else 
         {
-            $script:log.NewLog("SoQCertSubject", "ValidateSubject", "IsValid: False")
+            $script:libLogging.NewLog("SoQCertSubject", "ValidateSubject", "IsValid: False")
             $this.Result.SetFailureReason( "Does not contain a Subject. ($($this.Subject))" )
-            $script:log.NewLog("SoQCertSubject", "ValidateSubject", "Failure Reason: $($this.Result.FailureReason)")
-            $script:log.NewLog("SoQCertSubject", "ValidateSubject", "Subject: $($this.Subject), Requires: CN=<some text>")
+            $script:libLogging.NewLog("SoQCertSubject", "ValidateSubject", "Failure Reason: $($this.Result.FailureReason)")
+            $script:libLogging.NewLog("SoQCertSubject", "ValidateSubject", "Subject: $($this.Subject), Requires: CN=<some text>")
         }
 
-        $script:log.NewLog("SoQCertSubject", "ValidateSubject", "End")
+        $script:libLogging.NewLog("SoQCertSubject", "ValidateSubject", "End")
         return $isValidtmp
     }
 
@@ -549,42 +646,42 @@ class SoQCertSAN {
         $Certificate
     )
     {
-        $script:log.NewLog("SoQCertSAN","Start")
+        $script:libLogging.NewLog($null, "SoQCertSAN","Start")
         $this.ValidSANFnd    = $false
         $this.SubjectAltName = $Certificate.DnsNameList.Unicode
-        $script:log.NewLog("SoQCertSAN","Validate")
+        $script:libLogging.NewLog($null, "SoQCertSAN","Validate")
         $this.Result.SetValidity( $this.ValidateSAN() )
-        $script:log.NewLog("SoQCertSAN","End")
+        $script:libLogging.NewLog($null, "SoQCertSAN","End")
     }
 
     [SoQState]
     ValidateSAN() {
-        $script:log.NewLog("SoQCertSAN","ValidateSAN", "Start")
+        $script:libLogging.NewLog("SoQCertSAN","ValidateSAN", "Start")
         [SoQState]$isValidtmp = "Fail"
 
         # there must be a SAN
         if ( ($this.SubjectAltName).Count -ge 1 ) {
-            $script:log.NewLog("SoQCertSAN","ValidateSAN", "IsValidNum: True")
+            $script:libLogging.NewLog("SoQCertSAN","ValidateSAN", "IsValidNum: True")
             $isValidtmp = "Pass"
 
             # SAN's must be valid DNS names
             foreach ($e in $this.SubjectAltName) {
                 $isDNS = [System.Uri]::CheckHostName($e)
                 if ( $isDNS -eq "Unknown" ) {
-                    $script:log.NewLog("SoQCertSAN","ValidateSAN", "IsValid: False")
-                    $script:log.NewLog("SoQCertSAN","ValidateSAN", "dnsName: $e; isDNS: $isDNS")
+                    $script:libLogging.NewLog("SoQCertSAN","ValidateSAN", "IsValid: False")
+                    $script:libLogging.NewLog("SoQCertSAN","ValidateSAN", "dnsName: $e; isDNS: $isDNS")
                     $this.Result.AddToFailureReason("Invalid Subject Alternative Name: $e" )
                     $isValidtmp = "Warning"
                 } elseif ( $isDNS -eq "DNS" ) {
-                    $script:log.NewLog("SoQCertSAN","ValidateSAN", "Found a valid DNS name in SAN: $e")
+                    $script:libLogging.NewLog("SoQCertSAN","ValidateSAN", "Found a valid DNS name in SAN: $e")
                     $this.ValidSANFnd = $true
                 }
             }
         } else {
-            $script:log.NewLog("SoQCertSAN","ValidateSAN", "IsValid: False")
+            $script:libLogging.NewLog("SoQCertSAN","ValidateSAN", "IsValid: False")
             $this.Result.SetFailureReason( "No Subject Alternative Names. $(if ($this.SubjectAltName -gt 0) {"($($this.SubjectAltName -join ', '))"})" )
-            $script:log.NewLog("SoQCertSAN","ValidateSAN", "Failure Reason: $($this.Result.FailureReason)")
-            $script:log.NewLog("SoQCertSAN","ValidateSAN", "SubjectAltName: $($this.SubjectAltName -join ', '); Count: $(($this.SubjectAltName).Count); Count >= 1.")
+            $script:libLogging.NewLog("SoQCertSAN","ValidateSAN", "Failure Reason: $($this.Result.FailureReason)")
+            $script:libLogging.NewLog("SoQCertSAN","ValidateSAN", "SubjectAltName: $($this.SubjectAltName -join ', '); Count: $(($this.SubjectAltName).Count); Count >= 1.")
         }
 
         # decide whether to fail or warn
@@ -599,7 +696,7 @@ class SoQCertSAN {
             $this.Result.AddToFailureReason("but test passed due to a valid Subject Alternative Name found.")
         }
 
-        $script:log.NewLog("SoQCertSAN","ValidateSAN", "End")
+        $script:libLogging.NewLog("SoQCertSAN","ValidateSAN", "End")
         return $isValidtmp
     }
 
@@ -653,19 +750,19 @@ class SoQCertPrivateKey {
         $Certificate
     )
     {
-        $script:log.NewLog("SoQCertPrivateKey","Start")
+        $script:libLogging.NewLog($null, "SoQCertPrivateKey","Start")
         $this.HasPrivateKey = $Certificate.HasPrivateKey
         if ($Certificate.HasPrivateKey) {
             $this.Result.SetValidity( "Pass" )
-            $script:log.NewLog("SoQCertPrivateKey","IsValid: True")
+            $script:libLogging.NewLog($null, "SoQCertPrivateKey","IsValid: True")
         } else {
-            $script:log.NewLog("SoQCertPrivateKey","IsValid: False")
+            $script:libLogging.NewLog($null, "SoQCertPrivateKey","IsValid: False")
             $this.Result.SetFailureReason( "No Private Key." )
-            $script:log.NewLog("SoQCertPrivateKey","Failure Reason: $($this.Result.FailureReason)")
-            $script:log.NewLog("SoQCertPrivateKey","HasPrivateKey: False")
+            $script:libLogging.NewLog($null, "SoQCertPrivateKey","Failure Reason: $($this.Result.FailureReason)")
+            $script:libLogging.NewLog($null, "SoQCertPrivateKey","HasPrivateKey: False")
         }
 
-        $script:log.NewLog("SoQCertPrivateKey","End")
+        $script:libLogging.NewLog($null, "SoQCertPrivateKey","End")
     }
 
     [string]
@@ -716,11 +813,11 @@ class SoQCertSignatureAlgorithm {
         $Certificate
     )
     {
-        $script:log.NewLog("SoQCertSignatureAlgorithm","Start")
+        $script:libLogging.NewLog($null, "SoQCertSignatureAlgorithm","Start")
         $this.SignatureAlgorithm = $Certificate.SignatureAlgorithm.FriendlyName
-        $script:log.NewLog("SoQCertSignatureAlgorithm","Validate")
+        $script:libLogging.NewLog($null, "SoQCertSignatureAlgorithm","Validate")
         $this.Result.SetValidity( $this.ValidateSignatureAlgorithm() )
-        $script:log.NewLog("SoQCertSignatureAlgorithm","End")
+        $script:libLogging.NewLog($null, "SoQCertSignatureAlgorithm","End")
     }
 
     [string[]]
@@ -733,23 +830,23 @@ class SoQCertSignatureAlgorithm {
 
     [SoQState]
     ValidateSignatureAlgorithm() {
-        $script:log.NewLog("SoQCertSignatureAlgorithm","ValidateSignatureAlgorithm", "Start")
+        $script:libLogging.NewLog("SoQCertSignatureAlgorithm","ValidateSignatureAlgorithm", "Start")
         [SoQState]$isValidtmp = "Fail"
 
         if ( $this.SignatureAlgorithm -in $this.GetValidSigAlgo() ) {
 
-            $script:log.NewLog("SoQCertSignatureAlgorithm","ValidateSignatureAlgorithm", "IsValid: True")
+            $script:libLogging.NewLog("SoQCertSignatureAlgorithm","ValidateSignatureAlgorithm", "IsValid: True")
             $isValidtmp = "Pass"
         }
         else 
         {
-            $script:log.NewLog("SoQCertSignatureAlgorithm","ValidateSignatureAlgorithm", "IsValid: False")
+            $script:libLogging.NewLog("SoQCertSignatureAlgorithm","ValidateSignatureAlgorithm", "IsValid: False")
             $this.Result.SetFailureReason( "Uses a Signature Algorithm not known to work. ($($this.SignatureAlgorithm))" )
-            $script:log.NewLog("SoQCertSignatureAlgorithm","ValidateSignatureAlgorithm", "Failure Reason: $($this.Result.FailureReason)")
-            $script:log.NewLog("SoQCertSignatureAlgorithm","ValidateSignatureAlgorithm", "SignatureAlgorithm: $($this.SignatureAlgorithm), Valid Range: $($this.GetValidSigAlgo() -join ', ')")
+            $script:libLogging.NewLog("SoQCertSignatureAlgorithm","ValidateSignatureAlgorithm", "Failure Reason: $($this.Result.FailureReason)")
+            $script:libLogging.NewLog("SoQCertSignatureAlgorithm","ValidateSignatureAlgorithm", "SignatureAlgorithm: $($this.SignatureAlgorithm), Valid Range: $($this.GetValidSigAlgo() -join ', ')")
         }
 
-        $script:log.NewLog("SoQCertSignatureAlgorithm","ValidateSignatureAlgorithm", "End")
+        $script:libLogging.NewLog("SoQCertSignatureAlgorithm","ValidateSignatureAlgorithm", "End")
         return $isValidtmp
     }
 
@@ -802,11 +899,11 @@ class SoQCertSignatureHash {
         $Certificate
     )
     {
-        $script:log.NewLog("SoQCertSignatureHash","Start")
+        $script:libLogging.NewLog($null, "SoQCertSignatureHash","Start")
         $this.SignatureHash  = $this.GetHashString($Certificate)
-        $script:log.NewLog("SoQCertSignatureHash","Validate")
+        $script:libLogging.NewLog($null, "SoQCertSignatureHash","Validate")
         $this.Result.SetValidity( $this.ValidateSigHash() )
-        $script:log.NewLog("SoQCertSignatureHash","End")
+        $script:libLogging.NewLog($null, "SoQCertSignatureHash","End")
     }
 
     [string[]]
@@ -816,7 +913,7 @@ class SoQCertSignatureHash {
 
     [string]
     GetHashString([System.Security.Cryptography.X509Certificates.X509Certificate]$Certificate) {
-        $script:log.NewLog("SoQCertSignatureHash","GetHashString", "Start")
+        $script:libLogging.NewLog("SoQCertSignatureHash","GetHashString", "Start")
         $strHash = ""
 
         [regex]$rgxHash = "(?<hash>md\d{1})|(?<hash>sha\d{1,3})"
@@ -824,35 +921,35 @@ class SoQCertSignatureHash {
         if ( $Certificate.SignatureAlgorithm.FriendlyName -match $rgxHash )
         {
             $strHash = $Matches.hash.ToString().ToLower()
-            $script:log.NewLog("SoQCertSignatureHash","GetHashString", "Hash found. strHash: $strHash")
+            $script:libLogging.NewLog("SoQCertSignatureHash","GetHashString", "Hash found. strHash: $strHash")
         } else {
-            $script:log.NewLog("SoQCertSignatureHash","GetHashString", "Hash not found.")
+            $script:libLogging.NewLog("SoQCertSignatureHash","GetHashString", "Hash not found.")
             $strHash = "Unknown"
         }
 
-        $script:log.NewLog("SoQCertSignatureHash","GetHashString", "End")
+        $script:libLogging.NewLog("SoQCertSignatureHash","GetHashString", "End")
         return $strHash
     }
 
     [SoQState]
     ValidateSigHash() {
-        $script:log.NewLog("SoQCertSignatureHash","ValidateSigHash", "Start")
+        $script:libLogging.NewLog("SoQCertSignatureHash","ValidateSigHash", "Start")
         [SoQState]$isValidtmp = "Fail"
 
         if ( $this.SignatureHash -in $this.GetValidHash() )
         {
-            $script:log.NewLog("SoQCertSignatureHash","ValidateSigHash", "IsValid: True")
+            $script:libLogging.NewLog("SoQCertSignatureHash","ValidateSigHash", "IsValid: True")
             $isValidtmp = "Pass"
         }
         else 
         {
-            $script:log.NewLog("SoQCertSignatureHash","ValidateSigHash", "IsValid: False")
+            $script:libLogging.NewLog("SoQCertSignatureHash","ValidateSigHash", "IsValid: False")
             $this.Result.SetFailureReason( "Not a valid signature hash. ($($this.SignatureHash))" )
-            $script:log.NewLog("SoQCertSignatureHash","ValidateSigHash", "Failure Reason: $($this.Result.FailureReason)")
-            $script:log.NewLog("SoQCertSignatureHash","ValidateSigHash", "SignatureHash: $($this.SignatureHash), Valid Range: $($this.GetValidHash() -join ', ')")
+            $script:libLogging.NewLog("SoQCertSignatureHash","ValidateSigHash", "Failure Reason: $($this.Result.FailureReason)")
+            $script:libLogging.NewLog("SoQCertSignatureHash","ValidateSigHash", "SignatureHash: $($this.SignatureHash), Valid Range: $($this.GetValidHash() -join ', ')")
         }
 
-        $script:log.NewLog("SoQCertSignatureHash","ValidateSigHash", "End")
+        $script:libLogging.NewLog("SoQCertSignatureHash","ValidateSigHash", "End")
         return $isValidtmp
     }
 
@@ -905,11 +1002,11 @@ class SoQCertPublicKeyAlgorithm {
         $Certificate
     )
     {
-        $script:log.NewLog("SoQCertPublicKeyAlgorithm","Start")
+        $script:libLogging.NewLog($null, "SoQCertPublicKeyAlgorithm","Start")
         $this.PublicKeyAlgorithm = $this.GetPKAString($Certificate)
-        $script:log.NewLog("SoQCertPublicKeyAlgorithm","Validate")
+        $script:libLogging.NewLog($null, "SoQCertPublicKeyAlgorithm","Validate")
         $this.Result.SetValidity( $this.ValidatePKA() )
-        $script:log.NewLog("SoQCertPublicKeyAlgorithm","End")
+        $script:libLogging.NewLog($null, "SoQCertPublicKeyAlgorithm","End")
     }
 
     [string]
@@ -1019,35 +1116,35 @@ class SoQCertPublicKeyAlgorithm {
 
     [string[]]
     GetValidPKA() {
-        return @("ECDSA_P256", "ECDSA_P384", "ECDSA_P512", "RSA2048", "RSA4096")
+        return @("ECDSA_P256", "ECDSA_P384", "ECDSA_P521", "RSA2048", "RSA4096")
     }
 
     [SoQState]
     ValidatePKA() {
-        $script:log.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "Start")
+        $script:libLogging.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "Start")
         
         [SoQState]$isValidtmp = "Fail"
 
         if ( $this.Result.FailureReason ) {
             # Detection will fail when PowerShell 5.1 is used and the PKA is EC-based. 
             # Use that FailureReason and return $false
-            $script:log.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "IsValid: Warning")
+            $script:libLogging.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "IsValid: Warning")
             $isValidtmp = "Warning"
-            $script:log.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "Warning Reason: $($this.Result.FailureReason)")
+            $script:libLogging.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "Warning Reason: $($this.Result.FailureReason)")
         } elseif ( $this.PublicKeyAlgorithm -in $this.GetValidPKA() )
         {
-            $script:log.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "IsValid: True")
+            $script:libLogging.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "IsValid: True")
             $isValidtmp = "Pass"
         }
         else 
         {
-            $script:log.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "IsValid: False")
+            $script:libLogging.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "IsValid: False")
             $this.Result.SetFailureReason( "Not a known supported Public Key Algorithm. ($($this.PublicKeyAlgorithm))" )
-            $script:log.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "Failure Reason: $($this.Result.FailureReason)")
-            $script:log.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "PublicKeyAlgorithm: $($this.PublicKeyAlgorithm), Valid Range: $($this.GetValidPKA() -join ', ')")
+            $script:libLogging.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "Failure Reason: $($this.Result.FailureReason)")
+            $script:libLogging.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "PublicKeyAlgorithm: $($this.PublicKeyAlgorithm), Valid Range: $($this.GetValidPKA() -join ', ')")
         }
 
-        $script:log.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "End")
+        $script:libLogging.NewLog("SoQCertPublicKeyAlgorithm", "ValidatePKA", "End")
         return $isValidtmp
     }
 
@@ -1097,47 +1194,47 @@ class SoQCertCertChain {
         $Certificate
     )
     {
-        $script:log.NewLog("SoQCertCertChain", "Start")
-        $script:log.NewLog("SoQCertCertChain", "Validate")
+        $script:libLogging.NewLog($null, "SoQCertCertChain", "Start")
+        $script:libLogging.NewLog($null, "SoQCertCertChain", "Validate")
         $this.Result.SetValidity( $this.ValidateCertChain($Certificate) )
-        $script:log.NewLog("SoQCertCertChain", "End")
+        $script:libLogging.NewLog($null, "SoQCertCertChain", "End")
     }
 
     [SoQState]
     ValidateCertChain([System.Security.Cryptography.X509Certificates.X509Certificate]$Certificate) {
-        $script:log.NewLog("SoQCertCertChain", "ValidateCertChain", "Start")
+        $script:libLogging.NewLog("SoQCertCertChain", "ValidateCertChain", "Start")
         [SoQState]$isValidtmp = "Fail"
 
         ## let certutil handle cert chain validation ##
         # export the cer file
         $fn = "cert_$(Get-Date -Format "ddMMyyyyHHmmssffff").cer"
-        $script:log.NewLog("SoQCertCertChain", "ValidateCertChain", "Create file: $pwd\$fn")
+        $script:libLogging.NewLog("SoQCertCertChain", "ValidateCertChain", "Create file: $pwd\$fn")
         $null = Export-Certificate -Cert $Certificate -FilePath "$pwd\$fn" -Force
 
         # verify the cert chain
-        $script:log.NewLog("SoQCertCertChain", "ValidateCertChain", "Execute: certutil -verify `"$pwd\$fn`"")
+        $script:libLogging.NewLog("SoQCertCertChain", "ValidateCertChain", "Execute: certutil -verify `"$pwd\$fn`"")
         $results = certutil -verify "$pwd\$fn"
-        $script:log.NewLog("SoQCertCertChain", "ValidateCertChain", "Results:`n$results`n")
+        $script:libLogging.NewLog("SoQCertCertChain", "ValidateCertChain", "Results:`n$results`n")
 
 
         # remove the cer file
-        $script:log.NewLog("SoQCertCertChain", "ValidateCertChain", "Remove File")
+        $script:libLogging.NewLog("SoQCertCertChain", "ValidateCertChain", "Remove File")
         $null = Remove-Item "$pwd\$fn" -Force
 
         # validation is true if CERT_E_UNTRUSTEDROOT is not in the output
         if ( -NOT ($results | Where-Object { $_ -match 'CERT_E_UNTRUSTEDROOT' }) ) {
-            $script:log.NewLog("SoQCertCertChain", "ValidateCertChain", "IsValid: Pass")
+            $script:libLogging.NewLog("SoQCertCertChain", "ValidateCertChain", "IsValid: Pass")
             $isValidtmp = "Pass"
         }
         else 
         {
-            $script:log.NewLog("SoQCertCertChain", "ValidateCertChain", "IsValid: Fail")
+            $script:libLogging.NewLog("SoQCertCertChain", "ValidateCertChain", "IsValid: Fail")
             $this.Result.SetFailureReason( "Certificate chain validation failed. 'certutil -verify' returned error CERT_E_UNTRUSTEDROOT." )
-            $script:log.NewLog("SoQCertCertChain", "ValidateCertChain", "Failure Reason: $($this.Result.FailureReason)")
-            $script:log.NewLog("SoQCertCertChain", "ValidateCertChain", "CERT_E_UNTRUSTEDROOT:`n$(($results | Where-Object { $_ -match 'CERT_E_UNTRUSTEDROOT' }) -join "`n")`n`n ")
+            $script:libLogging.NewLog("SoQCertCertChain", "ValidateCertChain", "Failure Reason: $($this.Result.FailureReason)")
+            $script:libLogging.NewLog("SoQCertCertChain", "ValidateCertChain", "CERT_E_UNTRUSTEDROOT:`n$(($results | Where-Object { $_ -match 'CERT_E_UNTRUSTEDROOT' }) -join "`n")`n`n ")
         }
 
-        $script:log.NewLog("SoQCertCertChain", "ValidateCertChain", "End")
+        $script:libLogging.NewLog("SoQCertCertChain", "ValidateCertChain", "End")
         return $isValidtmp
     }
 
@@ -1201,7 +1298,7 @@ class SoQCipherSuite {
     }
 
     SetTlsString([string]$TlsString) {
-        $script:log.NewLog("SoQCipherSuite", "SetTlsString", "Cipher string: $TlsString")
+        $script:libLogging.NewLog("SoQCipherSuite", "SetTlsString", "Cipher string: $TlsString")
         $this.TlsString = $TlsString
     }
 
@@ -1212,18 +1309,18 @@ class SoQCipherSuite {
             $this.StrongCrypto = $false
         }
 
-        $script:log.NewLog("SoQCipherSuite", "SetStrongCrypto", "Strong crypto: $($this.StrongCrypto)")
+        $script:libLogging.NewLog("SoQCipherSuite", "SetStrongCrypto", "Strong crypto: $($this.StrongCrypto)")
     }
 
     SetIsVerTls13([string]$str) {
         if ($str -match 'TLS 1.3') {
-            $script:log.NewLog("SoQCipherSuite", "SetIsVerTls13", "Is TLS 1.3")
+            $script:libLogging.NewLog("SoQCipherSuite", "SetIsVerTls13", "Is TLS 1.3")
             $this.isVerTls13 = $true
         } else {
             $this.isVerTls13 = $false
-            $script:log.NewLog("SoQCipherSuite", "SetIsVerTls13", "Is NOT TLS 1.3")
+            $script:libLogging.NewLog("SoQCipherSuite", "SetIsVerTls13", "Is NOT TLS 1.3")
         }
-        $script:log.NewLog("SoQCipherSuite", "SetIsVerTls13", "TLS 1.3: $($this.isVerTls13)")
+        $script:libLogging.NewLog("SoQCipherSuite", "SetIsVerTls13", "TLS 1.3: $($this.isVerTls13)")
     }
 
     [string]
@@ -1263,13 +1360,13 @@ class SoQTls13Support {
     $Result = [SoQResult]::new()
 
     SoQTls13Support() {
-        $script:log.NewLog("SoQTls13Support", "Begin")
+        $script:libLogging.NewLog($null, "SoQTls13Support", "Begin")
         # if there is an internet connection we get the list of supported TLS 1.3 cipher suites
         if ((Get-NetConnectionProfile).IPv4Connectivity -contains "Internet" -or (Get-NetConnectionProfile).IPv6Connectivity -contains "Internet") {
-            $script:log.NewLog("SoQTls13Support", "Trying to get the live TLS 1.3 list.")
+            $script:libLogging.NewLog($null, "SoQTls13Support", "Trying to get the live TLS 1.3 list.")
             $this.GetTls13CipherSuitesFromInternet()
         } else {
-            $script:log.NewLog("SoQTls13Support", "Using last known good TLS 1.3 list.")
+            $script:libLogging.NewLog($null, "SoQTls13Support", "Using last known good TLS 1.3 list.")
             $this.UseLastKnownGoodTls13CipherSuites()
         }
 
@@ -1277,18 +1374,18 @@ class SoQTls13Support {
         $this.LocalCipherSuites = @()
 
         # test whether there is at least one valid TLS 1.3 cipher suite enabled on the system
-        $script:log.NewLog("SoQTls13Support", "Validating TLS 1.3 support.")
+        $script:libLogging.NewLog($null, "SoQTls13Support", "Validating TLS 1.3 support.")
         $this.ValidateLocalCipherSuite()
 
-        $script:log.NewLog("SoQTls13Support", "Result:`n$($this.ToString())")
-        $script:log.NewLog("SoQTls13Support", "End")
+        $script:libLogging.NewLog($null, "SoQTls13Support", "Result:`n$($this.ToString())")
+        $script:libLogging.NewLog($null, "SoQTls13Support", "End")
     }
 
     # populates Tls13CipherSuites with a list of known supported TLS 1.3 ciphers in Windows
     # https://learn.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-server-2022
     # Retrieved: 15 Feb 2023
     UseLastKnownGoodTls13CipherSuites() {
-        $script:log.NewLog("SoQTls13Support", "UseLastKnownGoodTls13CipherSuites", "Begin")
+        $script:libLogging.NewLog("SoQTls13Support", "UseLastKnownGoodTls13CipherSuites", "Begin")
         # use the last known good list of TLS 1.3 cipher suites
         $tmpList = @'
 [
@@ -1316,28 +1413,28 @@ class SoQTls13Support {
         # add results to the class
         $this.Tls13CipherSuites = $tmpObj   
         
-        $script:log.NewLog("SoQTls13Support", "UseLastKnownGoodTls13CipherSuites", "End")
+        $script:libLogging.NewLog("SoQTls13Support", "UseLastKnownGoodTls13CipherSuites", "End")
     }
 
     # Retrieves the current list of supported TLS 1.3 cipher suites.
     # https://learn.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-server-2022
     GetTls13CipherSuitesFromInternet() {
-        $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Start")
+        $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Start")
         # The TLS 1.3 cipher suites must be enabled in Windows.
         # right now SoQ only supports Windows Server 2022 so keep this simple for now
         $url = 'https://learn.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-server-2022'
 
         # download the page
-        $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Set TLS for Invoke-WebRequest.")
+        $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Set TLS for Invoke-WebRequest.")
         [System.Net.ServicePointManager]::SecurityProtocol = "Tls12", "Tls13"
 
         $rawSite = $null
         try {
-            $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Downloading the cipher suite site.")
+            $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Downloading the cipher suite site.")
             $rawSite = Invoke-WebRequest $url -UseBasicParsing -EA Stop
         }
         catch {
-            $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Failed to download the current TLS 1.3 list: $_")
+            $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Failed to download the current TLS 1.3 list: $_")
             $this.UseLastKnownGoodTls13CipherSuites()
         }
         
@@ -1353,7 +1450,7 @@ class SoQTls13Support {
             $rawSite.RawContent -split "`n" | Foreach-Object { 
                 # look for the table start
                 if ($_ -match "<table>") {
-                    $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Start table")
+                    $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Start table")
                     # controls whether to look for tr elements
                     $tableStarted = $true
 
@@ -1367,15 +1464,15 @@ class SoQTls13Support {
                     $tdNum = 1
 
                 } elseif ($_ -match '</table>') {
-                    $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "End table")
+                    $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "End table")
                     $tableStarted = $false
                 } elseif ( $tableStarted ) {
                     # look for a table header we want.
                     if ($_ -match '<tr>') {
-                        $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Start row")
+                        $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Start row")
                         $rowStarted = $true
                     } elseif ($_ -match '</tr>') {
-                        $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "End row")
+                        $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "End row")
                         $rowStarted = $false
 
                         $tmpRow = [SoQCipherSuite]::new()
@@ -1383,36 +1480,36 @@ class SoQTls13Support {
                         # parse the text between <td> and <br/></td> and add it to the class
                         if ($_ -match "<td>(?<str>\w{2}.*)<br/></td>") {
                             $text = $Matches.str
-                            $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Found match: $text")
+                            $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Found match: $text")
                             
                             if ( -NOT [string]::IsNullOrEmpty($text) ) {
                                 switch ($tdNum) {
                                     1 { 
-                                        $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Adding cipher string")
+                                        $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Adding cipher string")
                                         $tmpRow.SetTlsString($text)
                                         $tdNum++
                                     }
                                     
                                     2 { 
-                                        $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Adding strong crypto")
+                                        $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Adding strong crypto")
                                         $tmpRow.SetStrongCrypto($text) 
                                         $tdNum++
                                     }
 
                                     3 { 
-                                        $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Testing if TLS 1.3.")
+                                        $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Testing if TLS 1.3.")
                                         $tmpRow.SetIsVerTls13($text) 
 
                                         # add to the results only if it's a TLS 1.3 compatible suite
                                         if ($tmpRow.isVerTls13) {
-                                            $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Adding to list.`n`n$($tmpRow.ToString())`n`n")
+                                            $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Adding to list.`n`n$($tmpRow.ToString())`n`n")
                                             $tls13CipherTable += $tmpRow
                                         }
 
                                         $tdNum = 1
                                     }
 
-                                    default { $script:log.NewError("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "UNSUPPORTED_SWITCH_OPTION", "You shouldn't be here.", $true)}
+                                    default { $script:libLogging.NewError("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "UNSUPPORTED_SWITCH_OPTION", "You shouldn't be here.", $true)}
                                 }
                             }
                         }
@@ -1422,83 +1519,84 @@ class SoQTls13Support {
 
             # set the suites if we got results
             if ($tls13CipherTable.Count -ge 1) {
-                $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Successfully got a working list.")
-                $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "tls13CipherTable: $($tls13CipherTable.TlsString -join ', ')")
+                $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Successfully got a working list.")
+                $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "tls13CipherTable: $($tls13CipherTable.TlsString -join ', ')")
                 $this.Tls13CipherSuites = $tls13CipherTable
             # Otherwise, use the last known good set. Just in case something doesn't work.
             } else {
-                $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Something went wrong, falling back to Last Known Good list.")
+                $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "Something went wrong, falling back to Last Known Good list.")
                 $this.UseLastKnownGoodTls13CipherSuites()
             }
         }
 
-        $script:log.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "End")
+        $script:libLogging.NewLog("SoQTls13Support", "GetTls13CipherSuitesFromInternet", "End")
     }
 
     # checks whether the local list of suites has a TLS 1.3 cipher.
     # if the default is used we assume there is a supported cipher, because Windows Server 2022 supports TLS 1.3 by default
     ValidateLocalCipherSuite() {
-        $script:log.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Begin")
+        $script:libLogging.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Begin")
         # look for the registry value that controls cipher suites
         [array]$cipherPol = Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Cryptography\Configuration\SSL\00010002' | ForEach-Object { $_.Functions.Split(',') }
 
-        $script:log.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Cipher suites: $($cipherPol -join ', ')")
-        $script:log.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "TLS 1.3 suites: $($this.Tls13CipherSuites | Format-List | Out-String)")
+        $script:libLogging.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Cipher suites: $($cipherPol -join ', ')")
+        $script:libLogging.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "TLS 1.3 suites: $($this.Tls13CipherSuites | Format-List | Out-String)")
 
         if ($cipherPol.Count -ge 1) {
-            $script:log.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Starting validation.")
+            $script:libLogging.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Starting validation.")
             # test whether there is an approved TLS 1.3 cipher
             $fndValidTls13Suite = $false
 
             foreach ($c in $this.Tls13CipherSuites) { 
-                $script:log.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Looking for $($c.TlsString) in local cipher suites.")
+                $script:libLogging.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Looking for $($c.TlsString) in local cipher suites.")
                 if ($c.TlsString -in $cipherPol) {
-                    $script:log.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Found in local cipher suites. Marking test passed.")
+                    $script:libLogging.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Found in local cipher suites. Marking test passed.")
                     $this.LocalCipherSuites += $c.TlsString
                     $fndValidTls13Suite = $true
                 } else {
-                    $script:log.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "No match found in local cipher suite.")
+                    $script:libLogging.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "No match found in local cipher suite.")
                 }
             }
 
             if ($fndValidTls13Suite) {
-                $script:log.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Validation passed.")
+                $script:libLogging.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Validation passed.")
                 $this.Result.SetValidity( "Pass" )
             } else {
-                $script:log.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Validation failed.")
+                $script:libLogging.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Validation failed.")
                 $this.Result.SetValidity( "Fail" )
                 $this.Result.FailureReason = "The 'SSL Cipher Suite Order' policy has been modified and does not include a TLS 1.3 compatible cipher suite. See: https://learn.microsoft.com/en-us/windows/win32/secauthn/tls-cipher-suites-in-windows-server-2022"
             }
 
         } else {
-            $script:log.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Policy is default. Accepting this as a pass.")
+            $script:libLogging.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "Policy is default. Accepting this as a pass.")
+            # use last known good as a filler
+            $this.LocalCipherSuites = $this.Tls13CipherSuites.TlsString
             # no special cipher policy is installed, the default will be compatible.
             $this.Result.SetValidity( "Pass" )
         }
-        $script:log.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "End")
+        $script:libLogging.NewLog("SoQTls13Support", "ValidateLocalCipherSuite", "End")
     }
 
     [string]
     ToString() {
         return @"
 SoQTls13Support
-LocalCipherSuites : $($this.LocalCipherSuites -join ',') 
-Tls13CipherSuites : $($this.Tls13CipherSuites.TlsString -join ',') 
+LocalCipherSuites : $($this.LocalCipherSuites -join ', ') 
+Tls13CipherSuites : $($this.Tls13CipherSuites.TlsString -join ', ') 
 Valid             : $($this.Result.IsValid)
 $( if ( $this.Result.IsValid -eq "Fail") { "FailureReason : $($this.Result.FailureReason)" } elseif ($this.Result.IsValid -eq "Warning") { "WarningReason : $($this.Result.FailureReason)" })
 "@
     }
 
     [string]
-    ToShortString()
-    {
-        return "LocalCipherSuites: $($this.LocalCipherSuites -join ',') ($($this.Result.IsValid))"
+    ToShortString() {
+        return "LocalCipherSuites  : $($this.LocalCipherSuites -join ', ') ($($this.Result.IsValid))"
     }
 
     hidden
     [string]
     ToResultString() {
-        return "LocalCipherSuites: $($this.LocalCipherSuites -join ', '); Tls13CipherSuites: $($this.Tls13CipherSuites.TlsString -join ',') "
+        return "LocalCipherSuites  : $($this.LocalCipherSuites -join ', '); Tls13CipherSuites: $($this.Tls13CipherSuites.TlsString -join ',') "
     }
 
     [string]
@@ -1566,46 +1664,97 @@ class SoQCertValidation {
     hidden $IgnoreOS
     #endregion
 
-
-    SoQCertValidation([System.Security.Cryptography.X509Certificates.X509Certificate]$Certificate, $IgnoreOS)
+    # defaults to Server SKU tests
+    SoQCertValidation([System.Security.Cryptography.X509Certificates.X509Certificate]$Certificate, [bool]$IgnoreOS)
     {
-        $script:log.NewLog("SoQCertValidation", "Start")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Start [default]")
         $this.Certificate        = $Certificate
-        $script:log.NewLog("SoQCertValidation", "Thumbprint: $($this.Certificate.Thumbprint), Subject: $($this.Certificate.Subject)")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Thumbprint: $($this.Certificate.Thumbprint), Subject: $($this.Certificate.Subject)")
         if ($IgnoreOS) {
-            $script:log.NewLog("SoQCertValidation", "SupportedOS: Ignored")
+            $script:libLogging.NewLog($null, "SoQCertValidation", "SupportedOS: Ignored")
             $this.IgnoreOS           = $true
             $this.SupportedOS        = $null
         } else {
-            $script:log.NewLog("SoQCertValidation", "SupportedOS")
+            $script:libLogging.NewLog($null, "SoQCertValidation", "SupportedOS")
             $this.IgnoreOS           = $false
             $this.SupportedOS        = [SoQSupportedOS]::new()
         }
-        $script:log.NewLog("SoQCertValidation", "Expiration")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Expiration")
         $this.Expiration         = [SoQCertExpired]::new($Certificate)
-        $script:log.NewLog("SoQCertValidation", "Purpose")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Purpose")
         $this.Purpose            = [SoQCertPurpose]::new($Certificate)
-        $script:log.NewLog("SoQCertValidation", "KeyUsage")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "KeyUsage")
         $this.KeyUsage           = [SoQCertKeyUsage]::new($Certificate)
-        $script:log.NewLog("SoQCertValidation", "Subject")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Subject")
         $this.Subject            = [SoQCertSubject]::new($Certificate)
-        $script:log.NewLog("SoQCertValidation", "SubjectAltName")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "SubjectAltName")
         $this.SubjectAltName     = [SoQCertSAN]::new($Certificate)
-        $script:log.NewLog("SoQCertValidation", "PrivateKey")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "PrivateKey")
         $this.PrivateKey         = [SoQCertPrivateKey]::new($Certificate)
-        $script:log.NewLog("SoQCertValidation", "SignatureAlgorithm")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "SignatureAlgorithm")
         $this.SignatureAlgorithm = [SoQCertSignatureAlgorithm]::new($Certificate)
-        $script:log.NewLog("SoQCertValidation", "SignatureHash")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "SignatureHash")
         $this.SignatureHash      = [SoQCertSignatureHash]::new($Certificate)
-        $script:log.NewLog("SoQCertValidation", "PublicKeyAlgorithm")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "PublicKeyAlgorithm")
         $this.PublicKeyAlgorithm = [SoQCertPublicKeyAlgorithm]::new($Certificate)
-        $script:log.NewLog("SoQCertValidation", "CertChain")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "CertChain")
         $this.CertChain          = [SoQCertCertChain]::new($Certificate)
-        $script:log.NewLog("SoQCertValidation", "Tls13Support")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Tls13Support")
         $this.Tls13Support       = [SoQTls13Support]::new()
-        $script:log.NewLog("SoQCertValidation", "Validate")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Validate")
         $this.IsValid            = $this.ValidateSoQCert()
-        $script:log.NewLog("SoQCertValidation", "End")
+        $script:libLogging.NewLog($null, "SoQCertValidation", "End [default]")
+    } 
+
+    # allows client SKU specific testing
+    SoQCertValidation([System.Security.Cryptography.X509Certificates.X509Certificate]$Certificate, [bool]$IgnoreOS, [string]$strEKU)
+    {
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Start [eku]")
+
+        # convert the string EKU into a SoQEKUType
+        try {
+            [SoQEKUType]$eku = $strEKU
+            $script:libLogging.NewLog($null, "SoQCertValidation", "EKU: $strEKU")
+        } catch {
+            $script:libLogging.NewError("SoQCertValidation", "INVALID_EKU_TYPE", "The EKU type, $strEKU, is unsupported. The supported types are: $([enum]::GetNames([SoQEKUType]) -join ', ')", $true)
+        }
+
+        $this.Certificate        = $Certificate
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Thumbprint: $($this.Certificate.Thumbprint), Subject: $($this.Certificate.Subject)")
+        if ($IgnoreOS) {
+            $script:libLogging.NewLog($null, "SoQCertValidation", "SupportedOS: Ignored")
+            $this.IgnoreOS           = $true
+            $this.SupportedOS        = $null
+        } else {
+            $script:libLogging.NewLog($null, "SoQCertValidation", "SupportedOS")
+            $this.IgnoreOS           = $false
+            $this.SupportedOS        = [SoQSupportedOS]::new($eku)
+        }
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Expiration")
+        $this.Expiration         = [SoQCertExpired]::new($Certificate)
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Purpose")
+        $this.Purpose            = [SoQCertPurpose]::new($Certificate, $eku)
+        $script:libLogging.NewLog($null, "SoQCertValidation", "KeyUsage")
+        $this.KeyUsage           = [SoQCertKeyUsage]::new($Certificate)
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Subject")
+        $this.Subject            = [SoQCertSubject]::new($Certificate)
+        $script:libLogging.NewLog($null, "SoQCertValidation", "SubjectAltName")
+        $this.SubjectAltName     = [SoQCertSAN]::new($Certificate)
+        $script:libLogging.NewLog($null, "SoQCertValidation", "PrivateKey")
+        $this.PrivateKey         = [SoQCertPrivateKey]::new($Certificate)
+        $script:libLogging.NewLog($null, "SoQCertValidation", "SignatureAlgorithm")
+        $this.SignatureAlgorithm = [SoQCertSignatureAlgorithm]::new($Certificate)
+        $script:libLogging.NewLog($null, "SoQCertValidation", "SignatureHash")
+        $this.SignatureHash      = [SoQCertSignatureHash]::new($Certificate)
+        $script:libLogging.NewLog($null, "SoQCertValidation", "PublicKeyAlgorithm")
+        $this.PublicKeyAlgorithm = [SoQCertPublicKeyAlgorithm]::new($Certificate)
+        $script:libLogging.NewLog($null, "SoQCertValidation", "CertChain")
+        $this.CertChain          = [SoQCertCertChain]::new($Certificate)
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Tls13Support")
+        $this.Tls13Support       = [SoQTls13Support]::new()
+        $script:libLogging.NewLog($null, "SoQCertValidation", "Validate")
+        $this.IsValid            = $this.ValidateSoQCert()
+        $script:libLogging.NewLog($null, "SoQCertValidation", "End [eku]")
     }
 
 
@@ -1622,7 +1771,7 @@ class SoQCertValidation {
     [SoQState]
     ValidateSoQCert()
     {
-        $script:log.NewLog("SoQCertValidation", "ValidateSoQCert", "Start")
+        $script:libLogging.NewLog("SoQCertValidation", "ValidateSoQCert", "Start")
         [SoQState]$valid = "Pass"
         $tests = $this.GetSubclassVariables()
 
@@ -1631,11 +1780,11 @@ class SoQCertValidation {
 
         foreach ( $test in $tests )
         {
-            $script:log.NewLog("SoQCertValidation", "ValidateSoQCert", "Testing $($test.PadRight($theLongestLen, " ")) : $($this."$test".Result.IsValid)")
+            $script:libLogging.NewLog("SoQCertValidation", "ValidateSoQCert", "Testing $($test.PadRight($theLongestLen, " ")) : $($this."$test".Result.IsValid)")
             if ($this."$test".Result.IsValid -eq "Fail") { 
                 $valid = "Fail" 
                 $this.FailedTests += $test
-                $script:log.NewLog("SoQCertValidation", "ValidateSoQCert", "Failure reason: $($this."$test".Result.FailureReason)")
+                $script:libLogging.NewLog("SoQCertValidation", "ValidateSoQCert", "Failure reason: $($this."$test".Result.FailureReason)")
             } elseif ($this."$test".Result.IsValid -eq "Warning") { 
                 # do not overwrite the Fail state
                 if ($valid -ne "Fail") {
@@ -1643,11 +1792,11 @@ class SoQCertValidation {
                 }
 
                 $this.FailedTests += $test
-                $script:log.NewLog("SoQCertValidation", "ValidateSoQCert", "Warning reason: $($this."$test".Result.FailureReason)")
+                $script:libLogging.NewLog("SoQCertValidation", "ValidateSoQCert", "Warning reason: $($this."$test".Result.FailureReason)")
             }
         }
 
-        $script:log.NewLog("SoQCertValidation", "ValidateSoQCert", "End")
+        $script:libLogging.NewLog("SoQCertValidation", "ValidateSoQCert", "End")
         return $valid
     }
 
@@ -1766,3 +1915,73 @@ $TypeData = @{
 Update-TypeData @TypeData -EA SilentlyContinue
 
 #endregion
+
+#### CLASS TYPE ACCELERATOR ####
+#region
+
+<# Define the types to export with type accelerators.
+$ExportableTypes = @(
+    [SoQState]
+    [SoQEKUType]
+    [SoQResult]
+    [SoQSupportedOS]
+    [SoQCertExpired]
+    [SoQCertPurpose]
+    [SoQCertKeyUsage]
+    [SoQCertSubject]
+    [SoQCertSAN]
+    [SoQCertPrivateKey]
+    [SoQCertSignatureAlgorithm]
+    [SoQCertSignatureHash]
+    [SoQCertPublicKeyAlgorithm]
+    [SoQCertCertChain]
+    [SoQCipherSuite]
+    [SoQTls13Support]
+    [SoQCertValidation]
+)
+Write-Debug "ExportableTypes: $($ExportableTypes.FullName -join ', ')"
+
+# Get the internal TypeAccelerators class to use its static methods.
+$TypeAcceleratorsClass = [psobject].Assembly.GetType(
+    'System.Management.Automation.TypeAccelerators'
+)
+
+# Ensure none of the types would clobber an existing type accelerator.
+# If a type accelerator with the same name exists, throw an exception.
+$ExistingTypeAccelerators = $TypeAcceleratorsClass::Get
+foreach ($Type in $ExportableTypes) {
+    if ($Type.FullName -in $ExistingTypeAccelerators.Keys) {
+        $Message = @(
+            "Unable to register type accelerator '$($Type.FullName)'"
+            'Accelerator already exists.'
+        ) -join ' - '
+
+throw [System.Management.Automation.ErrorRecord]::new(
+            [System.InvalidOperationException]::new($Message),
+            'TypeAcceleratorAlreadyExists',
+            [System.Management.Automation.ErrorCategory]::InvalidOperation,
+            $Type.FullName
+        )
+    }
+}
+# Add type accelerators for every exportable type.
+foreach ($Type in $ExportableTypes) {
+    Write-Debug "Adding type: $($Type.FullName)"
+    $TypeAcceleratorsClass::Add($Type.FullName, $Type)
+}
+
+Write-Debug "Accelerators:`n$($TypeAcceleratorsClass | Format-List | Out-String)"
+
+
+# Remove type accelerators when the module is removed.
+$MyInvocation.MyCommand.ScriptBlock.Module.OnRemove = {
+    foreach($Type in $ExportableTypes) {
+        Write-Debug "Removing type: $($Type.FullName)"
+        $TypeAcceleratorsClass::Remove($Type.FullName)
+    }
+}.GetNewClosure()
+#>
+
+#### END ACCELERATOR
+#endregion
+

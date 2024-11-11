@@ -1,5 +1,4 @@
-# validate SMB over QUIC certificate
-#requires -RunAsAdministrator
+# PowerShell logging module
 #requires -Version 5.1
 
 using namespace System.Collections
@@ -11,8 +10,7 @@ using namespace System.Collections.Concurrent
 <#
 
 TO-DO:
-   - Enable not writing to file
-   - Set Module in construstor
+
 
 #>
 
@@ -22,6 +20,13 @@ enum LogType {
     main
     warning
     error
+}
+
+enum LogStatus {
+    Pending
+    Running
+    Closing
+    Complete
 }
 
 class Logging {
@@ -54,6 +59,10 @@ class Logging {
     [string]
     $Module
 
+    hidden
+    [string]
+    $ParentModule
+
     # Name of the MainStream file
     hidden
     [string]
@@ -85,6 +94,10 @@ class Logging {
     hidden
     [bool]
     $Closing
+    
+    # reports back the current status.
+    [LogStatus]
+    $Status
 
     #endregion
 
@@ -92,6 +105,7 @@ class Logging {
     #region
 
     Logging() {
+        $this.Status        = "Pending"
         $this.MainStream    = [ConcurrentQueue[string]]::new()
         $this.WarningStream = [ConcurrentQueue[string]]::new()
         $this.ErrorStream   = [ConcurrentQueue[string]]::new()
@@ -123,9 +137,11 @@ class Logging {
             Write-Error "Failed to create a logging file: $_" -EA Stop
             $this.NoWrite     = $true
         }
+        $this.Status      = "Running"
     }
 
     Logging([string]$loggingPath) {
+        $this.Status        = "Pending"
         $this.MainStream    = [ConcurrentQueue[string]]::new()
         $this.WarningStream = [ConcurrentQueue[string]]::new()
         $this.ErrorStream   = [ConcurrentQueue[string]]::new()
@@ -161,9 +177,11 @@ class Logging {
         } catch {
             Write-Error "Failed to create a logging file: $_" -EA Stop
         }
+        $this.Status      = "Running"
     }
 
     Logging([bool]$writeToFile) {
+        $this.Status        = "Pending"
         $this.MainStream    = [ConcurrentQueue[string]]::new()
         $this.WarningStream = [ConcurrentQueue[string]]::new()
         $this.ErrorStream   = [ConcurrentQueue[string]]::new()
@@ -205,9 +223,11 @@ class Logging {
         $this.Module      = "Validate-SoQCertificate"
         $this.Closing     = $false
         $this.Writing     = $false
+        $this.Status      = "Running"
     }
 
     Logging([string]$loggingPath, [string]$moduleName) {
+        $this.Status        = "Pending"
         $this.MainStream    = [ConcurrentQueue[string]]::new()
         $this.WarningStream = [ConcurrentQueue[string]]::new()
         $this.ErrorStream   = [ConcurrentQueue[string]]::new()
@@ -246,9 +266,11 @@ class Logging {
             Write-Error "Failed to create a logging file: $_" -EA Stop
             $this.NoWrite     = $true
         }
+        $this.Status      = "Running"
     }
 
     Logging([bool]$writeToFile, [string]$moduleName) {
+        $this.Status        = "Pending"
         $this.MainStream    = [ConcurrentQueue[string]]::new()
         $this.WarningStream = [ConcurrentQueue[string]]::new()
         $this.ErrorStream   = [ConcurrentQueue[string]]::new()
@@ -290,6 +312,7 @@ class Logging {
         $this.Module      = $moduleName
         $this.Closing     = $false
         $this.Writing     = $false
+        $this.Status      = "Running"
     }
 
     #endregion
@@ -311,6 +334,7 @@ class Logging {
         if ( -NOT $this.Closing) {
             # get the formatted entry
             $txt = $this.FormatEntry($module, $function, $code, $message, "error")
+            Write-Debug "txt: $txt"
 
             # add to the log
             $this.AddError($txt)
@@ -335,19 +359,47 @@ class Logging {
         if ( -NOT $this.Closing) {
             # get the formatted entry
             $txt = $this.FormatEntry($module, $function, $code, $message, "error")
+            Write-Debug "txt: $txt; terminating: $terminate"
 
             # add to the log
             $this.AddError($txt)
-
-            # create a formatted entry without ERROR: at the beginning, because Write-Error adds that
-            #$txt2 = $this.FormatEntry($module, $function, $code, $message, "main")
 
             if ($terminate) {
                 $this.Close()
                 #Write-Error -Message $txt -ErrorAction Stop
                 throw $txt
             } else {
-                Write-Error -Message $txt
+                # create a formatted entry without ERROR: at the beginning, because Write-Error adds that
+                $txt2 = $this.FormatEntry($module, $function, $code, $message, "main")
+                Write-Error -Message $txt2
+            }
+        }
+    }
+
+    # this version optionally terminates
+    NewError(
+        [string]$function, 
+        [string]$code, 
+        [string]$message,
+        [bool]$terminate
+    ) {
+        if ( -NOT $this.Closing) {
+            # get the formatted entry
+            $txt = $this.FormatEntry($this.Module, $function, $code, $message, "error")
+            Write-Debug "txt: $txt; terminating: $terminate"
+
+            # add to the log
+            $this.AddError($txt)
+
+            if ($terminate) {
+                $this.Close()
+                #Write-Error -Message $txt -ErrorAction Stop
+                throw $txt
+            } else {
+                # create a formatted entry without ERROR: at the beginning, because Write-Error adds that
+                $txt2 = $this.FormatEntry($this.Module, $function, $code, $message, "main")
+
+                Write-Error -Message $txt2
             }
         }
     }
@@ -361,24 +413,25 @@ class Logging {
         if ( -NOT $this.Closing) {
             # get the formatted entry
             $txt = $this.FormatEntry($this.Module, $null, $code, $message, "error")
+            Write-Debug "txt: $txt; terminating: $terminate"
 
             # add to the log
             $this.AddError($txt)
-
-            # create a formatted entry without ERROR: at the beginning, because Write-Error adds that
-            #$txt2 = $this.FormatEntry($module, $function, $code, $message, "main")
 
             if ($terminate) {
                 $this.Close()
                 #Write-Error -Message $txt -ErrorAction Stop
                 throw $txt
             } else {
-                Write-Error -Message $txt
+                # create a formatted entry without ERROR: at the beginning, because Write-Error adds that
+                $txt2 = $this.FormatEntry($this.Module, $null, $code, $message, "main")
+
+                Write-Error -Message $txt2
             }
         }
     }
 
-    # warnings never terminate
+    # warnings never terminates
     NewWarning(
         [string]$module, 
         [string]$function, 
@@ -394,6 +447,25 @@ class Logging {
 
             # create a formatted entry without WARNING: at the beginning, because Write-Warning adds that
             $txt2 = $this.FormatEntry($module, $function, $code, $message, "main")
+
+            Write-Warning $txt2
+        }
+    }
+
+    NewWarning(
+        [string]$function, 
+        [string]$code, 
+        [string]$message
+    ) {
+        if ( -NOT $this.Closing) {
+            # get the formatted entry
+            $txt = $this.FormatEntry($this.Module, $function, $code, $message, "warning")
+
+            # add to the log
+            $this.AddWarning($txt)
+
+            # create a formatted entry without WARNING: at the beginning, because Write-Warning adds that
+            $txt2 = $this.FormatEntry($this.Module, $function, $code, $message, "main")
 
             Write-Warning $txt2
         }
@@ -493,13 +565,28 @@ class Logging {
         }
     }
 
+    AddLog([string]$txt, [bool]$Timestamp) {
+        if ( -NOT [string]::IsNullOrEmpty($txt) ) { 
+            Write-Verbose "$txt"
+
+            if ( -NOT $this.NoWrite ) {
+                if ( $Timestamp -eq $true ) {
+                    $txt = "$($this.Timestamp())`: $txt"
+                }
+                
+                $this.IncrementMainStream()
+                $this.MainStream.Enqueue($txt)
+            }
+        }
+    }
+
     # non-terminating
     hidden
     AddWarning([string]$txt) {
         if ( -NOT [string]::IsNullOrEmpty($txt) ) { 
             $txt = "$($this.Timestamp())`: $txt" 
 
-            $this.AddLog($txt)
+            $this.AddLog($txt, $false)
 
             if ( -NOT $this.NoWrite ) { $this.WarningStream.Enqueue($txt) }
         }
@@ -511,7 +598,7 @@ class Logging {
         if ( -NOT [string]::IsNullOrEmpty($txt) ) { 
             $txt = "$($this.Timestamp())`: $txt" 
 
-            $this.AddLog($txt)
+            $this.AddLog($txt, $false)
             
             if ( -NOT $this.NoWrite ) { $this.ErrorStream.Enqueue($txt) }
         }
@@ -668,17 +755,25 @@ class Logging {
     [string]
     hidden
     FormatEntry(
-        [string]$module, 
+        [string]$mod, 
         [string]$function, 
         [string]$code, 
         [string]$message,
         [LogType]$logType
     ) {
         $str = ""
-        if ($module -match '-') {
+
+        # modules with a dash (-) are treated as cmdlet names, and not class related modules
+        if ($mod -match '-') {
             $modIsFunc = $true
         } else {
             $modIsFunc = $false
+        }
+
+        # when the module is null and the function contains something, swap the two
+        if (-NOT [string]::IsNullOrEmpty($function) -and [string]::IsNullOrEmpty($mod)) {
+            $mod = $function
+            $function = $null
         }
 
         # there must always be a module
@@ -686,25 +781,25 @@ class Logging {
             "error"   { 
                 # do not wrap in [] if the module name contains a dash (-)... assume this is a function
                 if ($modIsFunc) {
-                    $str = "ERROR: $module" 
+                    $str = "ERROR: $mod" 
                 } else {
-                    $str = "ERROR: [$module]" 
+                    $str = "ERROR: [$mod]" 
                 }
             }
             
             "warning" { 
                 if ($modIsFunc) {
-                    $str = "WARNING: $module" 
+                    $str = "WARNING: $mod" 
                 } else {
-                    $str = "WARNING: [$module]" 
+                    $str = "WARNING: [$mod]" 
                 }
             }
 
             default   { 
                 if ($modIsFunc) {
-                    $str = "$module"
+                    $str = "$mod"
                 } else {
-                    $str = "[$module]"
+                    $str = "[$mod]"
                 }
                 
             }
@@ -731,6 +826,8 @@ class Logging {
     }
 
     Close() {
+        $this.Status      = "Closing"
+
         # set Closing to $true
         $this.Closing = $true
 
@@ -783,6 +880,7 @@ class Logging {
         $this.Writing = $null
 
         $this.LogPath = $null
+        $this.Status      = "Complete"
     }
 
     Clear() {
@@ -802,7 +900,7 @@ class Logging {
     #endregion METHODS
 }
 
-
+#region
 $TypeData = @{
     TypeName   = 'Logging'
     MemberType = 'ScriptProperty'
@@ -837,13 +935,348 @@ $TypeData = @{
 }
 
 Update-TypeData @TypeData -EA SilentlyContinue
+#endregion
 
 #endregion LOGGING
 
 <#
-    $script:log.NewLog("")
-    $script:log.NewLog("module", function", "message")
-    $script:log.NewLog("function", "message")
-    $script:log.NewError("code", "", $false)
-    $script:log.NewWarning("code", "")
+    $script:libLogging.NewLog("")
+    $script:libLogging.NewLog("module", function", "message")
+    $script:libLogging.NewLog("function", "message")
+    $script:libLogging.NewError("code", "", $false)
+    $script:libLogging.NewWarning("code", "")
 #>
+
+function script:Start-Logging {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [string]
+        $ModuleName,
+
+        [Parameter()]
+        [string]
+        $LogPath = $null
+    )
+
+    Write-Verbose "Start-Logging - ModuleName: $ModuleName"
+    Write-Verbose "Start-Logging - LogPath: $LogPath"
+    # do not write the log unless LogPath has a valid path
+    if ( [string]::IsNullOrEmpty($LogPath) ) {
+        Write-Verbose "No log write mode."
+
+        # change the module if the log var exists
+        if ($script:libLogging) {
+            $oldLogMod = $script:libLogging.Module
+            Write-Verbose "oldLogMod: $oldLogMod"
+            Set-LogModule -ModuleName $moduleName
+        # otherwise create a new log
+        } else {
+            Write-Verbose "New log file."
+            $oldLogMod = $null
+            # create new log with NoWrite set to $true
+            $script:libLogging = [Logging]::new($false, $moduleName)
+            Set-LogParentModule -ParentModule $moduleName
+            $script:libLogging.NewLog("Start-Logging - Parent module: $($script:libLogging.ParentModule)")
+
+        }
+    } else {
+        Write-Verbose "Write logs to path: $LogPath"
+    
+        # LogPath must be a directory
+        $lpIsDir = Get-Item "$LogPath" -EA SilentlyContinue
+        if ( $lpIsDir -and -NOT $lpIsDir.PSIsContainer ) { $LogPath = $PWD.Path }
+
+        # create the dir if needed
+        try {
+            $null = New-Item "$LogPath" -ItemType Directory -Force -EA Stop
+        } catch {
+            # use PWD instead
+            $LogPath = $PWD.Path
+        }
+
+        if ($logFnd) {
+            $oldLogMod = $script:libLogging.Module
+            Set-LogModule -ModuleName $moduleName
+        # otherwise create a new log
+        } else {
+            $oldLogMod = ""
+            # create new log with NoWrite set to $true
+            $script:libLogging = [Logging]::new($LogPath, $moduleName)
+            Set-LogParentModule -ParentModule $moduleName
+            $script:libLogging.NewLog("Start-Logging - Parent module: $($script:libLogging.ParentModule)")
+        } 
+    }
+
+    return $oldLogMod
+}
+
+
+function script:Close-Logging {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [string]
+        $ModuleName,
+
+        [Parameter()]
+        [string]
+        $oldLogMod = $null
+    )
+
+    # close the log if the parent module calls Close-Logging
+    $script:libLogging.NewLog("Close-Logging - ModuleName: $ModuleName; Parent: $($script:libLogging.ParentModule)")
+    $script:libLogging.NewLog("Close-Logging - oldLogMod: $oldLogMod")
+    if ( $ModuleName -eq $script:libLogging.ParentModule ) { # -or [string]::IsNullOrEmpty($oldLogMod)
+        $script:libLogging.NewLog("Close-Logging - Closing log.")
+        $script:libLogging.Close()
+    # swap module name back when returning to a caller
+    } else {
+        $script:libLogging.NewLog("Close-Logging - Change log module back to $oldLogMod")
+        $script:libLogging.Module = $oldLogMod
+    }
+    
+}
+
+
+
+
+# Returns the log status
+function script:Get-LogStatus {
+    if ( -NOT $script:libLogging) {
+        return $null
+    }
+
+    return $script:libLogging.Status
+}
+
+# Gets the current active module name.
+function script:Get-LogModule {
+    if ( -NOT $script:libLogging) {
+        return $null
+    }
+
+    return $script:libLogging.Module
+}
+
+# Get the parent module (the module that started logging).
+function script:Get-LogParentModule {
+    if ( -NOT $script:libLogging) {
+        return $null
+    }
+    
+    return $script:libLogging.ParentModule
+}
+
+# Returns an object containing the location of the three logging (main, warning, and error) files.
+function script:Get-LogFile {
+    # bail if logging has not started
+    if ( -NOT $script:libLogging) {
+        return $null
+    }
+
+    # bail when NoWrite is true
+    if ( $script:libLogging.NoWrite ) {
+        return $true
+    }
+
+    # the objet to return
+    $obj = [PSCustomObject]@{
+        Main    = $script:libLogging.MainFile
+        Warning = $script:libLogging.WarningFile
+        Error   = $script:libLogging.ErrorFile
+    }
+
+    return $obj
+}
+
+# Updates the active module name.
+function script:Set-LogModule {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $ModuleName
+    )
+    
+    $script:libLogging.Module = $moduleName
+}
+
+# Updates the parent module name.
+function script:Set-LogParentModule {
+    [CmdletBinding()]
+    param (
+        [Parameter()]
+        [string]
+        $ParentModule
+    )
+    
+    $script:libLogging.ParentModule = $ParentModule
+}
+
+
+function script:Write-Log {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [string]
+        $Text,
+
+        [Parameter()]
+        [string]
+        $Module = $null,
+
+        [Parameter()]
+        [string]
+        $Function = $null
+    )
+
+    # most of the work is handled by the class.
+    # proceed only if there's something to log and let the class figure out the rest.
+    if ( -NOT [string]::IsNullOrEmpty($Text) -and -NOT [string]::IsNullOrWhiteSpace($Text) ) {
+        # write with module and function from args when module and function are not null/empty
+        if ( -NOT [string]::IsNullOrEmpty($Module) -and -NOT [string]::IsNullOrEmpty($Function) ) {
+            $script:libLogging.NewLog($Text, $Function, $Module)
+        # write with the function 
+        } elseif ( [string]::IsNullOrEmpty($Module) -and -NOT [string]::IsNullOrEmpty($Function) ) {
+            $script:libLogging.NewLog($Text, $Function)
+        # write just the text
+        } else {
+            $script:libLogging.NewLog($Text)
+        }
+    } else {
+        Write-Debug "Write-Log - No text passed."
+    }
+}
+
+
+<#
+
+# warnings never terminate, use default module, no function
+    NewWarning(
+        [string]$code, 
+        [string]$message
+    )
+
+    NewWarning(
+        [string]$module, 
+        [string]$function, 
+        [string]$code, 
+        [string]$message
+    )
+
+    NewWarning(
+        [string]$function, 
+        [string]$code, 
+        [string]$message
+    )
+
+#>
+function script:Write-LogWarning {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [string]
+        $Text,
+
+        [Parameter(Mandatory)]
+        [string]
+        $Code,
+
+        [Parameter()]
+        [string]
+        $Module = $null,
+
+        [Parameter()]
+        [string]
+        $Function = $null
+    )
+
+    # most of the work is handled by the class.
+    # proceed only if there's something to log and let the class figure out the rest.
+    if ( (-NOT [string]::IsNullOrEmpty($Text) -and -NOT [string]::IsNullOrWhiteSpace($Text)) -and 
+         (-NOT [string]::IsNullOrEmpty($Code) -and -NOT [string]::IsNullOrWhiteSpace($Code)) ) {
+
+        # write with module and function from args when module and function are not null/empty
+        if ( -NOT [string]::IsNullOrEmpty($Module) -and -NOT [string]::IsNullOrEmpty($Function) ) {
+            $script:libLogging.NewWarning($Module, $Function, $Code, $Text)
+        # write with the function 
+        } elseif ( [string]::IsNullOrEmpty($Module) -and -NOT [string]::IsNullOrEmpty($Function) ) {
+            $script:libLogging.NewWarning($Function, $Code, $Text)
+        # write just the text
+        } else {
+            $script:libLogging.NewWarning($Code, $Text)
+        }
+    } else {
+        Write-Debug "Write-LogWarning - No text or code passed. Text: $Text; Code: $Code"
+    }
+}
+
+
+<#
+# this version always terminates
+   NewError(
+        [string]$code, 
+        [string]$message,
+        [bool]$terminate
+    )
+
+    NewError(
+        [string]$function, 
+        [string]$code, 
+        [string]$message,
+        [bool]$terminate
+    )
+
+    NewError(
+        [string]$module, 
+        [string]$function, 
+        [string]$code, 
+        [string]$message,
+        [bool]$terminate
+    )
+
+#>
+function script:Write-LogError {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory)]
+        [string]
+        $Text,
+
+        [Parameter(Mandatory)]
+        [string]
+        $Code,
+
+        [Parameter()]
+        [string]
+        $Module = $null,
+
+        [Parameter()]
+        [string]
+        $Function = $null,
+
+        [Parameter()]
+        [switch]
+        $NonTerminating
+    )
+
+    # most of the work is handled by the class.
+    # proceed only if there's something to log and let the class figure out the rest.
+    if ( (-NOT [string]::IsNullOrEmpty($Text) -and -NOT [string]::IsNullOrWhiteSpace($Text)) -and 
+         (-NOT [string]::IsNullOrEmpty($Code) -and -NOT [string]::IsNullOrWhiteSpace($Code)) ) {
+
+        # write with module and function from args when module and function are not null/empty
+        if ( -NOT [string]::IsNullOrEmpty($Module) -and -NOT [string]::IsNullOrEmpty($Function) ) {
+            $script:libLogging.NewError($Module, $Function, $Code, $Text, !$NonTerminating.IsPresent)
+        # write with the function 
+        } elseif ( [string]::IsNullOrEmpty($Module) -and -NOT [string]::IsNullOrEmpty($Function) ) {
+            $script:libLogging.NewError($Function, $Code, $Text, !$NonTerminating.IsPresent)
+        # write just the text
+        } else {
+            $script:libLogging.NewError($Code, $Text, !$NonTerminating.IsPresent)
+        }
+    } else {
+        Write-Debug "Write-LogError - No text or code passed. Text: $Text; Code: $Code"
+    }
+}
